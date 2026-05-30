@@ -72,3 +72,14 @@ mkfixture_honggfuzz() {
 
 # mktmp — returns a tempdir path; auto-cleanup on EXIT via caller's trap
 mktmp() { mktemp -d "/tmp/afl-cov-test.XXXXXX"; }
+
+# detect_clang — echo a usable clang binary name (clang or clang-NN), return 1
+# if none is found. Used by toolchain-gated integration tests to skip cleanly.
+detect_clang() {
+  if command -v clang >/dev/null 2>&1; then echo clang; return 0; fi
+  local v
+  for v in 26 25 24 23 22 21 20 19 18 17 16 15 14 13 12 11; do
+    if command -v "clang-$v" >/dev/null 2>&1; then echo "clang-$v"; return 0; fi
+  done
+  return 1
+}

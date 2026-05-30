@@ -27,6 +27,9 @@ FUZZER_LAYOUT=""   # set by cmd_report; one of: afl | flat
 log()  { test "$QUIET" -eq 0 && echo "[+] $*" || true; }
 logv() { test "$VERBOSE" -eq 1 && echo "[*] $*" || true; }
 err()  { echo "[-] $*" >&2; }
+# Like log() but writes to stderr. Used by commands (e.g. search) whose stdout
+# must stay machine-readable so it can be piped.
+loge() { test "$QUIET" -eq 0 && echo "[+] $*" >&2 || true; }
 
 # Validate an option's value. Prints error and exits 1 if $2 is missing or
 # begins with '-'. Usage: need_arg <opt-name> <value-or-empty>
@@ -161,6 +164,64 @@ count_files() {
   "$@" | tr -cd '\0' | wc -c
 }
 
+# Parse a "FILE:LINE" target spec. Splits on the LAST ':' so paths that contain
+# colons still parse. Prints "FILE<TAB>LINE" and returns 0 on success; prints an
+# error and returns 1 on a malformed spec.
+parse_target_spec() {
+  local spec="$1" file line
+  case "$spec" in
+    *:*) ;;
+    *)   err "Target must be FILE:LINE (got '$spec')"; return 1 ;;
+  esac
+  file="${spec%:*}"
+  line="${spec##*:}"
+  if test -z "$file"; then
+    err "Target FILE part is empty in '$spec'"; return 1
+  fi
+  case "$line" in
+    ''|*[!0-9]*) err "Target LINE must be a positive integer (got '$line')"; return 1 ;;
+  esac
+  if test "$line" -eq 0; then
+    err "Target LINE must be >= 1 (got '$line')"; return 1
+  fi
+  printf '%s\t%s\n' "$file" "$line"
+}
+
+# Classify a source line's coverage from LCOV text on stdin.
+# Args: FILE LINE. Prints exactly one of: covered | uncovered | absent.
+#   covered   — a matching DA:LINE,COUNT has COUNT > 0
+#   uncovered — a matching DA:LINE,COUNT exists with COUNT == 0
+#   absent    — no DA:LINE record in any matching SF: block
+# An SF: path matches FILE when it equals FILE or ends with "/FILE" (suffix
+# match with a path boundary). Returns 0 (state is on stdout).
+lcov_line_state() {
+  local file="$1" line="$2"
+  awk -v tf="$file" -v tl="$line" '
+    function endswith(s, suf,   ls, lsuf) {
+      ls = length(s); lsuf = length(suf);
+      return (ls >= lsuf && substr(s, ls - lsuf + 1) == suf);
+    }
+    /^SF:/ {
+      sf = substr($0, 4);
+      inmatch = (sf == tf) || endswith(sf, "/" tf);
+      next;
+    }
+    /^end_of_record/ { inmatch = 0; next }
+    inmatch && /^DA:/ {
+      split(substr($0, 4), a, ",");
+      if (a[1] == tl) {
+        seen = 1;
+        if (a[2] + 0 > 0) covered = 1;
+      }
+    }
+    END {
+      if (covered)    print "covered";
+      else if (seen)  print "uncovered";
+      else            print "absent";
+    }
+  '
+}
+
 # Emit the coverage replay driver C source
 emit_driver() {
   cat << 'DRIVER_EOF'
@@ -255,7 +316,8 @@ Commands:
   build       Build target with LLVM coverage instrumentation
   driver      Emit coverage_driver.c for LLVMFuzzerTestOneInput harnesses
   diff        Compare coverage between two llvm-cov JSON exports
-  stability   Analyze corpus stability and deduplication (not yet implemented)
+  stability   Analyze corpus stability (per-line non-deterministic hit counts)
+  search      List corpus entries that reach a given FILE:LINE
 
 Run 'cov-analysis <command> --help' for command-specific options.
 
@@ -409,6 +471,43 @@ Examples:
   cov-analysis stability -d out -e "./cov @@"
   cov-analysis stability -d out -e "./cov @@" -n 8 -s src/
   cov-analysis stability -d ./corpus -e "./cov @@" -t 4
+EOF
+}
+
+usage_search() {
+  cat << 'EOF'
+Usage: cov-analysis search FILE:LINE -d <dir> -e "<cmd>" [options]
+
+  Report which corpus entries reach a given source line. Each input is replayed
+  in isolation through the coverage binary; an input "reaches" FILE:LINE when its
+  line-execution count for that line is > 0.
+
+  Matching input paths are printed to stdout (one per line, sorted), so the
+  output pipes cleanly. Progress and the summary go to stderr.
+
+Required:
+  FILE:LINE   Source location, e.g. src/foo.c:123 (single line; split on last ':')
+  -d <dir>    Fuzzing output directory (AFL++, libFuzzer, libafl, or honggfuzz)
+  -e <cmd>    Coverage command. Use @@ as input file placeholder.
+              Omit @@ to feed input via stdin instead.
+
+Optional:
+  --crashes          Also scan crash and timeout inputs (default: corpus only)
+  -t <num>           Parallel workers for the per-input scan (default: 1)
+  -T <secs>          Per-input replay timeout in seconds (default: 5)
+  --layout <kind>    Force layout: 'afl' or 'flat' (default: auto-detect)
+  -v                 Verbose output
+  -q                 Quiet mode (suppress all [+] output)
+  -V                 Print version and exit
+  -h, --help         Print this help and exit
+
+Examples:
+  cov-analysis search src/parser.c:142 -d out -e "./cov @@"
+  cov-analysis search src/parser.c:142 -d out -e "./cov @@" --crashes -t 8
+  cov-analysis search src/parser.c:142 -d ./corpus -e "./cov"     # stdin input
+
+  # Feed the reaching inputs into another tool:
+  cov-analysis search src/parser.c:142 -d out -e "./cov @@" | xargs -I{} cp {} ./hits/
 EOF
 }
 
@@ -732,7 +831,9 @@ cmd_stability() {
   local stable_count total_lines unstable_lines
   stable_count=$(printf '%s\n' "$analysis_out" | awk '/^STABILITY_STATS/{print $2}')
   total_lines=$(printf '%s\n'  "$analysis_out" | awk '/^STABILITY_STATS/{print $3}')
-  unstable_lines="$(printf '%s\n' "$analysis_out" | grep -v '^STABILITY_STATS' | sort -V)"
+  # grep -v exits 1 (and, under pipefail, aborts) when every line is the
+  # STABILITY_STATS record — i.e. when coverage is perfectly stable. Tolerate it.
+  unstable_lines="$(printf '%s\n' "$analysis_out" | grep -v '^STABILITY_STATS' | sort -V || true)"
   : "${stable_count:=0}" "${total_lines:=0}"
 
   # ── extend to double the runs if instability found (default -n only) ───────
@@ -748,7 +849,7 @@ cmd_stability() {
     analysis_out="$(_stab_analyze "$RUNS")"
     stable_count=$(printf '%s\n' "$analysis_out" | awk '/^STABILITY_STATS/{print $2}')
     total_lines=$(printf '%s\n'  "$analysis_out" | awk '/^STABILITY_STATS/{print $3}')
-    unstable_lines="$(printf '%s\n' "$analysis_out" | grep -v '^STABILITY_STATS' | sort -V)"
+    unstable_lines="$(printf '%s\n' "$analysis_out" | grep -v '^STABILITY_STATS' | sort -V || true)"
     : "${stable_count:=0}" "${total_lines:=0}"
   fi
 
@@ -813,6 +914,274 @@ cmd_stability() {
       echo "[+] All executed lines are perfectly stable."
     fi
   fi
+}
+
+# ── command: search ────────────────────────────────────────────────────────
+
+# Replay ALL selected inputs into one profraw dir for the union pre-check.
+# Mirrors cmd_report's replay (trailing-@@ batch when the binary carries the
+# LLVMFuzzerTestOneInput signature; mid-@@ loop; stdin loop). Crash/timeout
+# inputs are replayed under the -T timeout when INCLUDE_CRASHES=1.
+# Reads globals: COVERAGE_CMD, COV_BINARY, FORKS, TIMEOUT, INCLUDE_CRASHES.
+_search_replay_union() {
+  local outdir="$1"
+  export LLVM_PROFILE_FILE="$outdir/cov-%p.profraw"
+
+  case "$COVERAGE_CMD" in
+    *@@*)
+      local LAST_TOKEN="${COVERAGE_CMD##* }"
+      if test "$LAST_TOKEN" = "@@"; then
+        if ! grep -qaF '###SIGNATURE_LLVMFUZZERTESTONEINPUT_COVERAGE###' "$COV_BINARY" 2>/dev/null; then
+          LAST_TOKEN="x"
+        fi
+      fi
+      if test "$LAST_TOKEN" = "@@"; then
+        local CMD_NO_AT="${COVERAGE_CMD% @@}"
+        # shellcheck disable=SC2016
+        find_queue_files | xargs -0 -r -n 128 -P "$FORKS" \
+          sh -c "${CMD_NO_AT}"' "$@"' -- >/dev/null 2>&1 || true
+      else
+        find_queue_files | xargs -0 -r -n 1 -P "$FORKS" \
+          bash -c 'eval "${1/@@/$2}"' _ "$COVERAGE_CMD" >/dev/null 2>&1 || true
+      fi
+      ;;
+    *)
+      find_queue_files | xargs -0 -r -n 1 -P "$FORKS" \
+        bash -c 'eval "$1" < "$2"' _ "$COVERAGE_CMD" >/dev/null 2>&1 || true
+      ;;
+  esac
+
+  if test "$INCLUDE_CRASHES" -eq 1; then
+    case "$COVERAGE_CMD" in
+      *@@*)
+        find_crash_timeout_files | xargs -0 -r -n 1 -P "$FORKS" \
+          bash -c 'timeout --signal=SIGTERM "${2}s" bash -c "${1/@@/$3}"' \
+          _ "$COVERAGE_CMD" "$TIMEOUT" >/dev/null 2>&1 || true
+        ;;
+      *)
+        find_crash_timeout_files | xargs -0 -r -n 1 -P "$FORKS" \
+          bash -c 'timeout --signal=SIGTERM "${2}s" bash -c "$1" < "$3"' \
+          _ "$COVERAGE_CMD" "$TIMEOUT" >/dev/null 2>&1 || true
+        ;;
+    esac
+  fi
+}
+
+# Per-input worker for the parallel scan. Replays ONE input in isolation, merges
+# its profile, and prints the input path iff the target line is `covered`.
+# The input path is $1; all other config is read from exported COV_SEARCH_* env
+# vars (cmd_search exports them before the xargs fan-out). This function and
+# lcov_line_state are `export -f`'d so the xargs `bash -c` subshells can call them.
+# Always best-effort: never aborts on a single bad input.
+_search_one_input() {
+  local in="$1" work state="absent"
+  work="$(mktemp -d "${COV_SEARCH_WORKROOT}/w.XXXXXX")" || return 0
+  export LLVM_PROFILE_FILE="$work/cov-%p.profraw"
+
+  case "$COV_SEARCH_CMD" in
+    *@@*) timeout --signal=SIGTERM "${COV_SEARCH_TIMEOUT}s" \
+            bash -c "${COV_SEARCH_CMD/@@/$in}" >/dev/null 2>&1 || true ;;
+    *)    timeout --signal=SIGTERM "${COV_SEARCH_TIMEOUT}s" \
+            bash -c "$COV_SEARCH_CMD" < "$in" >/dev/null 2>&1 || true ;;
+  esac
+
+  if compgen -G "$work/cov-"'*.profraw' >/dev/null 2>&1; then
+    if "$COV_SEARCH_PROFDATA" merge -sparse "$work"/cov-*.profraw \
+         -o "$work/m.profdata" 2>/dev/null; then
+      state="$("$COV_SEARCH_COV" export "$COV_SEARCH_BIN" --format=lcov \
+                 "-instr-profile=$work/m.profdata" 2>/dev/null \
+               | lcov_line_state "$COV_SEARCH_FILE" "$COV_SEARCH_LINE")"
+    fi
+  fi
+
+  rm -rf "$work"
+  test "$state" = "covered" && printf '%s\n' "$in"
+  return 0
+}
+
+cmd_search() {
+  local AFL_DIR=""
+  local COVERAGE_CMD=""
+  local TARGET_SPEC=""
+  local FORKS=1
+  local TIMEOUT=5
+  local INCLUDE_CRASHES=0
+  local LLVM_PROFDATA=""
+  local LLVM_COV=""
+  local COV_BINARY=""
+  local FUZZER_LAYOUT="${FUZZER_LAYOUT:-}"
+  local TARGET_FILE="" TARGET_LINE=""
+
+  if test $# -eq 0; then usage_search; exit 1; fi
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -d)        need_arg "-d" "${2-}"; AFL_DIR="$2";       shift 2 ;;
+      -e)        need_arg "-e" "${2-}"; COVERAGE_CMD="$2";  shift 2 ;;
+      -t)        need_arg "-t" "${2-}"; FORKS="$2";         shift 2 ;;
+      -T)        need_arg "-T" "${2-}"; TIMEOUT="$2";       shift 2 ;;
+      --crashes) INCLUDE_CRASHES=1;                         shift   ;;
+      -v)        VERBOSE=1;                                 shift   ;;
+      -q)        QUIET=1;                                   shift   ;;
+      -V)        echo "cov-analysis-$VERSION"; exit 0 ;;
+      -h|--help) usage_search; exit 0 ;;
+      --layout)  need_arg "--layout" "${2-}"; FUZZER_LAYOUT="$2"; shift 2 ;;
+      -*)        err "Unknown option: $1"; echo "" >&2; usage_search >&2; exit 1 ;;
+      *)
+        if test -n "$TARGET_SPEC"; then
+          err "Unexpected extra argument: $1 (only one FILE:LINE target is allowed)"
+          exit 1
+        fi
+        TARGET_SPEC="$1"; shift ;;
+    esac
+  done
+
+  # ── validate inputs ──────────────────────────────────────────────────────
+  if test -z "$TARGET_SPEC"; then
+    err "Must specify a FILE:LINE target (e.g. src/foo.c:123)"; exit 1
+  fi
+  if test -z "$AFL_DIR"; then
+    err "Must specify input directory with -d"; exit 1
+  fi
+  if test -z "$COVERAGE_CMD"; then
+    err "Must specify coverage command with -e"; exit 1
+  fi
+  if ! test -d "$AFL_DIR"; then
+    err "Input directory does not exist: $AFL_DIR"; exit 1
+  fi
+  case "$FORKS" in
+    ''|*[!0-9]*|0) err "Replay worker count must be a positive integer: $FORKS"; exit 1 ;;
+  esac
+  case "$TIMEOUT" in
+    ''|*[!0-9]*|0) err "Timeout (-T) must be a positive integer in seconds: $TIMEOUT"; exit 1 ;;
+  esac
+  if test -n "$FUZZER_LAYOUT"; then
+    case "$FUZZER_LAYOUT" in
+      afl|flat) ;;
+      *) err "--layout must be 'afl' or 'flat' (got '$FUZZER_LAYOUT')"; exit 1 ;;
+    esac
+  fi
+
+  # Parse and split the target spec.
+  local parsed
+  parsed="$(parse_target_spec "$TARGET_SPEC")" || exit 1
+  TARGET_FILE="${parsed%$'\t'*}"
+  TARGET_LINE="${parsed##*$'\t'}"
+
+  COV_BINARY="$(extract_binary "$COVERAGE_CMD")"
+  if test -z "$COV_BINARY"; then
+    err "Could not extract binary path from coverage command: $COVERAGE_CMD"; exit 1
+  fi
+  if ! test -x "$COV_BINARY"; then
+    err "Coverage binary not found or not executable: $COV_BINARY"; exit 1
+  fi
+
+  # ── detect LLVM tools ────────────────────────────────────────────────────
+  LLVM_PROFDATA="$(find_tool llvm-profdata)" || {
+    err "llvm-profdata not found. Install LLVM (apt install llvm / dnf install llvm)."; exit 1
+  }
+  LLVM_COV="$(find_tool llvm-cov)" || {
+    err "llvm-cov not found. Install LLVM (apt install llvm / dnf install llvm)."; exit 1
+  }
+  loge "LLVM tools      : $LLVM_PROFDATA, $LLVM_COV"
+
+  # ── detect or honor fuzzer layout ────────────────────────────────────────
+  if test -z "$FUZZER_LAYOUT"; then
+    FUZZER_LAYOUT="$(detect_fuzzer_layout)"
+  fi
+  case "$FUZZER_LAYOUT" in
+    afl)  loge "Fuzzer layout   : AFL++ (queue/crashes/timeouts)" ;;
+    flat) loge "Fuzzer layout   : flat (libFuzzer/libafl/honggfuzz)" ;;
+    empty)
+      err "No input files found in $AFL_DIR"
+      err "Expected one of: AFL++ out dir, libFuzzer/libafl corpus, honggfuzz workspace."
+      err "Override detection with --layout afl|flat if needed."
+      exit 1 ;;
+  esac
+
+  # ── count selected inputs ────────────────────────────────────────────────
+  local QUEUE_COUNT CRASH_COUNT=0 TOTAL
+  QUEUE_COUNT=$(count_files find_queue_files)
+  if test "$QUEUE_COUNT" -eq 0; then
+    err "No corpus files found in $AFL_DIR"; exit 1
+  fi
+  if test "$INCLUDE_CRASHES" -eq 1; then
+    CRASH_COUNT=$(count_files find_crash_timeout_files)
+  fi
+  TOTAL=$((QUEUE_COUNT + CRASH_COUNT))
+
+  loge "Target          : $TARGET_FILE:$TARGET_LINE"
+  loge "Inputs to scan  : $TOTAL (queue=$QUEUE_COUNT, crashes/timeouts=$CRASH_COUNT)"
+
+  # ── workspace ──────────────────────────────────────────────────────────────
+  local SEARCH_DIR
+  SEARCH_DIR="$(mktemp -d /tmp/cov-analysis-search.XXXXXX)"
+  trap "rm -rf '$SEARCH_DIR'" EXIT INT TERM
+
+  # ── union pre-check ────────────────────────────────────────────────────────
+  loge "Union pre-check : replaying $TOTAL input(s) to test reachability..."
+  local UNION_DIR="$SEARCH_DIR/union"
+  mkdir -p "$UNION_DIR"
+  _search_replay_union "$UNION_DIR"
+
+  local praw_count
+  praw_count=$(find "$UNION_DIR" -name 'cov-*.profraw' -printf . 2>/dev/null | wc -c)
+  if test "$praw_count" -eq 0; then
+    err "No .profraw files generated."
+    err "Check that the binary is instrumented with -fprofile-instr-generate."
+    err "Use 'cov-analysis build' to build the coverage binary."
+    exit 1
+  fi
+
+  local union_state="absent"
+  if "$LLVM_PROFDATA" merge -sparse "$UNION_DIR"/cov-*.profraw \
+       -o "$UNION_DIR/m.profdata" 2>/dev/null; then
+    union_state="$("$LLVM_COV" export "$COV_BINARY" --format=lcov \
+                     "-instr-profile=$UNION_DIR/m.profdata" 2>/dev/null \
+                   | lcov_line_state "$TARGET_FILE" "$TARGET_LINE")"
+  fi
+
+  if test "$union_state" != "covered"; then
+    if test "$union_state" = "uncovered"; then
+      loge "$TARGET_FILE:$TARGET_LINE is executable but no selected input reaches it."
+      test "$INCLUDE_CRASHES" -eq 0 && \
+        loge "(retry with --crashes to also scan crash/timeout inputs)"
+    else
+      loge "$TARGET_FILE:$TARGET_LINE is not in the coverage data."
+      loge "The path or line number may be wrong, or the line is non-executable."
+    fi
+    loge "0 of $TOTAL inputs reach $TARGET_FILE:$TARGET_LINE"
+    exit 0
+  fi
+
+  # ── per-input scan ───────────────────────────────────────────────────────
+  loge "Reachable in union; scanning $TOTAL input(s) individually (workers=$FORKS)..."
+  export COV_SEARCH_CMD="$COVERAGE_CMD" \
+         COV_SEARCH_BIN="$COV_BINARY" \
+         COV_SEARCH_PROFDATA="$LLVM_PROFDATA" \
+         COV_SEARCH_COV="$LLVM_COV" \
+         COV_SEARCH_TIMEOUT="$TIMEOUT" \
+         COV_SEARCH_FILE="$TARGET_FILE" \
+         COV_SEARCH_LINE="$TARGET_LINE" \
+         COV_SEARCH_WORKROOT="$SEARCH_DIR"
+  export -f _search_one_input lcov_line_state
+
+  {
+    find_queue_files
+    test "$INCLUDE_CRASHES" -eq 1 && find_crash_timeout_files
+  } | xargs -0 -r -n 1 -P "$FORKS" \
+        bash -c '_search_one_input "$1"' _ \
+    | sort > "$SEARCH_DIR/matches.txt" || true
+
+  local match_count
+  # grep -c prints 0 and exits 1 on an empty file; `|| true` keeps that single
+  # "0" without appending a second one (which `|| echo 0` would do).
+  match_count=$(grep -c . "$SEARCH_DIR/matches.txt" 2>/dev/null || true)
+  : "${match_count:=0}"
+
+  cat "$SEARCH_DIR/matches.txt"
+  loge "$match_count of $TOTAL inputs reach $TARGET_FILE:$TARGET_LINE"
+  exit 0
 }
 
 # ── command: diff ────────────────────────────────────────────────────────────
@@ -1582,7 +1951,7 @@ if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
   # Detect optional command; default to "report"
   COMMAND="report"
   case "$1" in
-    build|driver|report|diff|stability) COMMAND="$1"; shift ;;
+    build|driver|report|diff|stability|search) COMMAND="$1"; shift ;;
   esac
 
   case "$COMMAND" in
@@ -1591,5 +1960,6 @@ if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
     report)    cmd_report "$@" ;;
     diff)      cmd_diff "$@" ;;
     stability) cmd_stability "$@" ;;
+    search)    cmd_search "$@" ;;
   esac
 fi

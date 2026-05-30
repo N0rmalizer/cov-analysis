@@ -12,6 +12,7 @@ Version: 1.0.0
   - [Step 2: Generate Coverage Report](#step-2-generate-coverage-report)
   - [Step 3: Diff Two Coverage Reports](#step-3-diff-two-coverage-reports)
   - [Step 4: Identifying unstable code lines](#step-4-identifying-unstable-code-lines)
+  - [Step 5: Search which inputs reach a line](#step-5-search-which-inputs-reach-a-line)
   - [Parallelized AFL Execution](#parallelized-afl-execution)
 - [Usage Information](#usage-information)
   - [cov-analysis report (default)](#cov-analysis-report-default)
@@ -19,6 +20,7 @@ Version: 1.0.0
   - [cov-analysis driver](#cov-analysis-driver)
   - [cov-analysis diff](#cov-analysis-diff)
   - [cov-analysis stability](#cov-analysis-stability)
+  - [cov-analysis search](#cov-analysis-search)
 - [License](#license)
 
 ## Introduction
@@ -203,6 +205,44 @@ Stability   : 74.0% (91/123 executed lines stable)
 [!] Unstable coverage detected.
 ```
 
+### Step 5: Search which inputs reach a line
+
+Wonder which corpus entries actually exercise a particular source line? The
+`search` command replays each input in isolation and reports the ones that
+reach `FILE:LINE`:
+
+```bash
+cov-analysis search src/parser.c:142 -d ../afl/out -e "./cov @@"
+```
+
+Matching input paths are printed to stdout (one per line, sorted) so the result
+pipes cleanly; progress and the summary go to stderr:
+
+```
+src/parser.c:142 is reachable; scanning...
+out/queue/id:000017,...
+out/queue/id:000094,...
+[+] 2 of 142 inputs reach src/parser.c:142
+```
+
+By default only queue/corpus entries are scanned. Add `--crashes` to also scan
+crash and timeout inputs, and `-t N` to parallelize:
+
+```bash
+cov-analysis search src/parser.c:142 -d ../afl/out -e "./cov @@" --crashes -t 8
+```
+
+A fast union pre-check replays the whole corpus once first; if no input reaches
+the line, `search` reports `0 of N` immediately (and tells you whether the line
+is merely unreached or not present in the coverage data at all) without the full
+per-input scan.
+
+Pipe the reaching inputs straight into another tool:
+
+```bash
+cov-analysis search src/parser.c:142 -d ../afl/out -e "./cov @@" | xargs -I{} cp {} ./hits/
+```
+
 ### Parallelized AFL Execution
 
 For parallel AFL runs (`afl-fuzz -o sync_dir`), point `-d` at the top-level sync directory. `cov-analysis` automatically discovers all fuzzer instance subdirectories:
@@ -308,6 +348,33 @@ Examples:
 cov-analysis stability -d out/ -e "./cov @@"
 cov-analysis stability -d out/ -e "./cov @@" -n 8 -s src/
 cov-analysis stability -d ./corpus -e "./cov @@" -t 4
+```
+
+### cov-analysis search
+
+```
+Usage: cov-analysis search FILE:LINE -d <dir> -e "<cmd>" [options]
+
+  Report which corpus entries reach a given source line. Each input is replayed
+  in isolation; an input "reaches" FILE:LINE when its line-execution count for
+  that line is > 0. Matching input paths print to stdout (sorted, one per line);
+  progress and the summary go to stderr.
+
+Required:
+  FILE:LINE   Source location, e.g. src/foo.c:123 (single line)
+  -d <dir>    Fuzzing output directory (AFL++, libFuzzer, libafl, or honggfuzz)
+  -e <cmd>    Coverage command. Use @@ as input file placeholder.
+              Omit @@ to feed input via stdin instead.
+
+Optional:
+  --crashes          Also scan crash and timeout inputs (default: corpus only)
+  -t <num>           Parallel workers for the per-input scan (default: 1)
+  -T <secs>          Per-input replay timeout in seconds (default: 5)
+  --layout <kind>    Force layout: 'afl' or 'flat' (default: auto-detect)
+  -v                 Verbose output
+  -q                 Quiet mode
+  -V                 Print version and exit
+  -h, --help         Print this help and exit
 ```
 
 ## License
