@@ -21,7 +21,7 @@ extern int __llvm_profile_write_file(void);
 
 static void crash_handler(int sig) {
     __llvm_profile_write_file();
-    fprintf(stderr, "ERROR: Coverage gathering aborted due signal!\n");
+    fprintf(stderr, "ERROR: Coverage gathering aborted due to signal!\n");
     raise(sig);
 }
 

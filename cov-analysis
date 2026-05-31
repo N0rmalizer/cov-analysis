@@ -30,6 +30,7 @@ err()  { echo "[-] $*" >&2; }
 # Like log() but writes to stderr. Used by commands (e.g. search) whose stdout
 # must stay machine-readable so it can be piped.
 loge() { test "$QUIET" -eq 0 && echo "[+] $*" >&2 || true; }
+logerr() { test "$QUIET" -eq 0 && echo "[-] $*" >&2 || true; }
 
 # Validate an option's value. Prints error and exits 1 if $2 is missing or
 # begins with '-'. Usage: need_arg <opt-name> <value-or-empty>
@@ -1143,14 +1144,14 @@ cmd_search() {
 
   if test "$union_state" != "covered"; then
     if test "$union_state" = "uncovered"; then
-      loge "$TARGET_FILE:$TARGET_LINE is executable but no selected input reaches it."
+      logerr "$TARGET_FILE:$TARGET_LINE is executable but no selected input reaches it."
       test "$INCLUDE_CRASHES" -eq 0 && \
-        loge "(retry with --crashes to also scan crash/timeout inputs)"
+        logerr "(retry with --crashes to also scan crash/timeout inputs)"
     else
-      loge "$TARGET_FILE:$TARGET_LINE is not in the coverage data."
-      loge "The path or line number may be wrong, or the line is non-executable."
+      logerr "$TARGET_FILE:$TARGET_LINE is not in the coverage data."
+      logerr "The path or line number may be wrong, or the line is non-executable."
     fi
-    loge "0 of $TOTAL inputs reach $TARGET_FILE:$TARGET_LINE"
+    logerr "0 of $TOTAL inputs reach $TARGET_FILE:$TARGET_LINE"
     exit 0
   fi
 
