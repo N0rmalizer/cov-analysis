@@ -38,7 +38,10 @@ This is a rewrite of the original cov-analysis. Key changes in 1.0.0:
 ## Prerequisites
 
 - `clang` (any version down to 11)
-- `llvm-profdata` and `llvm-cov` (matching the clang version; auto-detected)
+- `llvm-profdata` and `llvm-cov` — auto-detected to match the selected clang
+  version. When a versioned compiler is chosen (e.g. `CC=clang-22`, or the
+  default `clang` reports version 22), the matching `llvm-profdata-22` /
+  `llvm-cov-22` are used so the raw profiles merge without a version mismatch.
 - AFL++ (`afl-fuzz`), libafl, libfuzzer, Honggfuzz, ... - only needed to produce the corpus, not to run `cov-analysis`
 
 ## Supported Fuzzers

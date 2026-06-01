@@ -46,14 +46,43 @@ need_arg() {
   esac
 }
 
-# Find an LLVM tool by bare name, then versioned (20 down to 11)
+# Echo the LLVM major version that tool selection should match, or nothing.
+# LLVM tools must match the clang that produced the .profraw, otherwise
+# `llvm-profdata merge` fails with a version mismatch. We derive the version
+# from the selected compiler so e.g. CC=clang-22 maps to llvm-profdata-22:
+#   1. an explicit version suffix in CC/CXX  (clang-22  -> 22)
+#   2. the version reported by the selected clang (CC, else plain `clang`)
+llvm_version_hint() {
+  local c base v
+  for c in "${CC-}" "${CXX-}"; do
+    test -n "$c" || continue
+    base="$(basename -- "$c" 2>/dev/null)"
+    case "$base" in
+      *-[0-9]*) echo "${base##*-}"; return 0 ;;
+    esac
+  done
+  c="${CC:-clang}"
+  command -v "$c" >/dev/null 2>&1 || return 0
+  v="$("$c" --version 2>/dev/null | grep -oiE 'clang version [0-9]+' | grep -oE '[0-9]+' | head -n1)"
+  test -n "$v" && echo "$v"
+  return 0
+}
+
+# Find an LLVM tool, preferring the version matching the selected clang
+# (see llvm_version_hint), then the bare name, then versioned (26 down to 11).
 find_tool() {
   local tool="$1"
+  local ver hint
+  hint="$(llvm_version_hint)"
+  if test -n "$hint" && command -v "${tool}-${hint}" >/dev/null 2>&1; then
+    echo "${tool}-${hint}"
+    return 0
+  fi
   if command -v "$tool" >/dev/null 2>&1; then
     echo "$tool"
     return 0
   fi
-  for ver in 20 19 18 17 16 15 14 13 12 11; do
+  for ver in 26 25 24 23 22 21 20 19 18 17 16 15 14 13 12 11; do
     if command -v "${tool}-${ver}" >/dev/null 2>&1; then
       echo "${tool}-${ver}"
       return 0
@@ -391,6 +420,11 @@ Usage: cov-analysis build <build-command> [args...]
     cov-analysis build make -j$(nproc)
 
   Set CC/CXX environment variables to override the auto-detected clang.
+
+  The report/diff/stability commands pick llvm-profdata / llvm-cov to match
+  the selected clang version (e.g. CC=clang-22 -> llvm-profdata-22), so raw
+  profiles merge without a version mismatch. Keep CC/CXX consistent between
+  building and reporting, or set CC to the versioned clang when reporting.
 
 Options:
   -h, --help    Show this help
