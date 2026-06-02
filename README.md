@@ -326,6 +326,11 @@ Usage: cov-analysis stability [options]
   Reports a stability percentage. If instability is found with the default
   4 runs, reruns for a total of 8 to confirm.
 
+  Resilient to flaky passes: a pass whose profiles cannot be collected or
+  merged (e.g. a crashing input that left a truncated .profraw behind) is
+  skipped and the run continues with the remaining passes, as long as at
+  least 2 passes succeed.
+
 Required:
   -d <dir>    Fuzzing output directory (AFL++, libFuzzer, libafl, or honggfuzz)
   -e <cmd>    Coverage command. Use @@ as input file placeholder.
@@ -343,7 +348,7 @@ Optional:
   -h, --help         Print this help and exit
 ```
 
-The command outputs a **Stability Report** showing corpus size, number of runs, and the stability percentage (stable executed lines / total executed lines). If unstable lines are found, they are listed with file paths and line number ranges.
+The command outputs a **Stability Report** showing corpus size, number of runs, and the stability percentage (stable executed lines / total executed lines). If unstable lines are found, they are listed with file paths and line number ranges. If any pass failed to collect or merge its profiles, it is skipped and the report notes how many runs were actually analyzed.
 
 Examples:
 

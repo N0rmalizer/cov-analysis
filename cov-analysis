@@ -485,6 +485,11 @@ Usage: cov-analysis stability [options]
   Reports a stability percentage. If instability is found with the default
   4 runs, reruns for a total of 8 to confirm.
 
+  Resilient to flaky passes: a pass whose profiles cannot be collected or
+  merged (e.g. a crashing input that left a truncated .profraw behind) is
+  skipped and the run continues with the remaining passes, as long as at
+  least 2 passes succeed.
+
 Required:
   -d <dir>    Fuzzing output directory (AFL++, libFuzzer, libafl, or honggfuzz)
   -e <cmd>    Coverage command. Use @@ as input file placeholder.
@@ -786,20 +791,24 @@ cmd_stability() {
         ;;
     esac
 
+    # A single failed pass must never abort the whole run: stability is a
+    # multi-sample measurement, so we skip a bad pass (return 1) and let the
+    # caller carry on with the rest. The most common cause is a crashing or
+    # timed-out input that left a truncated .profraw behind.
     local profraw_count
     profraw_count=$(find "$run_dir" -name '*.profraw' -printf . 2>/dev/null | wc -c)
     if test "$profraw_count" -eq 0; then
-      err "No .profraw files generated in pass $idx."
-      err "Check that the binary is instrumented with -fprofile-instr-generate."
-      err "Use 'cov-analysis build' to build the coverage binary."
-      exit 1
+      err "No .profraw files generated in pass $idx; skipping it."
+      return 1
     fi
     logv "Pass $idx: merging $profraw_count profraw file(s)..."
 
-    "$LLVM_PROFDATA" merge -sparse "$run_dir"/*.profraw \
+    # --failure-mode=all: tolerate individual corrupt/truncated .profraw files
+    # (drop them, keep the valid ones); only fail if every profile is invalid.
+    "$LLVM_PROFDATA" merge -sparse --failure-mode=all "$run_dir"/*.profraw \
       -o "$STAB_DIR/merged_run_${idx}.profdata" 2>/dev/null || {
-      err "llvm-profdata merge failed for pass $idx"
-      exit 1
+      err "llvm-profdata merge failed for pass $idx; skipping it."
+      return 1
     }
 
     logv "Pass $idx: exporting LCOV..."
@@ -807,9 +816,8 @@ cmd_stability() {
       --format=lcov \
       "-instr-profile=$STAB_DIR/merged_run_${idx}.profdata" \
       > "$STAB_DIR/run_${idx}.lcov" 2>/dev/null || {
-      err "llvm-cov export (lcov) failed for pass $idx."
-      err "LCOV export requires LLVM 12 or later."
-      exit 1
+      err "llvm-cov export (lcov) failed for pass $idx; skipping it."
+      return 1
     }
 
     logv "Pass $idx: parsing hit counts..."
@@ -821,22 +829,40 @@ cmd_stability() {
         print file ":" a[1] "\t" a[2]
       }
     ' "$STAB_DIR/run_${idx}.lcov" | sort > "$STAB_DIR/run_${idx}.hits"
+    return 0
   }
 
+  # stab_passes holds the run indices that produced usable per-line hit counts.
+  # Failed passes are skipped (see _stab_collect_pass) instead of aborting.
+  local stab_passes=()
   local run_idx
   for run_idx in $(seq 1 "$RUNS"); do
-    _stab_collect_pass "$run_idx"
+    if _stab_collect_pass "$run_idx"; then
+      stab_passes+=("$run_idx")
+    fi
   done
 
+  # Comparing hit counts across runs needs at least two successful passes.
+  if test "${#stab_passes[@]}" -lt 2; then
+    err "Only ${#stab_passes[@]} of $RUNS pass(es) produced coverage data — need at least 2 to assess stability."
+    err "Check that the binary is instrumented with -fprofile-instr-generate (see 'cov-analysis build')."
+    exit 1
+  fi
+  if test "${#stab_passes[@]}" -lt "$RUNS"; then
+    err "$((RUNS - ${#stab_passes[@]})) of $RUNS pass(es) failed and were skipped; analyzing the ${#stab_passes[@]} that succeeded."
+  fi
+
   # ── stability analysis ─────────────────────────────────────────────────────
-  # Reads $1 hit files (run_1.hits .. run_N.hits) from $STAB_DIR.
-  # Uses gawk ARGIND to track which file each record belongs to.
+  # Args: the run indices of the successful passes (e.g. 1 3 4). Reads the
+  # matching run_<idx>.hits files from $STAB_DIR. Uses gawk ARGIND (1..n in
+  # argument order) to track which file each record belongs to.
   # Outputs: one "file:linenum" per unstable line, then "STABILITY_STATS S T".
   _stab_analyze() {
-    local n="$1"
+    local indices=("$@")
+    local n="${#indices[@]}"
     local hit_files=()
     local i
-    for i in $(seq 1 "$n"); do
+    for i in "${indices[@]}"; do
       hit_files+=("$STAB_DIR/run_${i}.hits")
     done
     "$GAWK" -v n="$n" '
@@ -859,9 +885,9 @@ cmd_stability() {
     ' "${hit_files[@]}"
   }
 
-  log "Analyzing stability across $RUNS runs..."
+  log "Analyzing stability across ${#stab_passes[@]} runs..."
   local analysis_out
-  analysis_out="$(_stab_analyze "$RUNS")"
+  analysis_out="$(_stab_analyze "${stab_passes[@]}")"
 
   local stable_count total_lines unstable_lines
   stable_count=$(printf '%s\n' "$analysis_out" | awk '/^STABILITY_STATS/{print $2}')
@@ -876,12 +902,14 @@ cmd_stability() {
     local extra_end=$((RUNS * 2))
     log "Instability detected, extending from $RUNS to $extra_end runs..."
     for run_idx in $(seq $((RUNS + 1)) "$extra_end"); do
-      _stab_collect_pass "$run_idx"
+      if _stab_collect_pass "$run_idx"; then
+        stab_passes+=("$run_idx")
+      fi
     done
     RUNS="$extra_end"
 
-    log "Re-analyzing stability across $RUNS runs..."
-    analysis_out="$(_stab_analyze "$RUNS")"
+    log "Re-analyzing stability across ${#stab_passes[@]} runs..."
+    analysis_out="$(_stab_analyze "${stab_passes[@]}")"
     stable_count=$(printf '%s\n' "$analysis_out" | awk '/^STABILITY_STATS/{print $2}')
     total_lines=$(printf '%s\n'  "$analysis_out" | awk '/^STABILITY_STATS/{print $3}')
     unstable_lines="$(printf '%s\n' "$analysis_out" | grep -v '^STABILITY_STATS' | sort -V || true)"
@@ -932,7 +960,12 @@ cmd_stability() {
     echo "Stability Report"
     echo "--------------------------------------------------------"
     printf "Corpus size : %s inputs\n" "$CORPUS_SIZE"
-    printf "Runs        : %s\n"        "$RUNS"
+    if test "${#stab_passes[@]}" -eq "$RUNS"; then
+      printf "Runs        : %s\n" "$RUNS"
+    else
+      printf "Runs        : %d analyzed (%d of %d failed and were skipped)\n" \
+        "${#stab_passes[@]}" "$((RUNS - ${#stab_passes[@]}))" "$RUNS"
+    fi
     printf "Stability   : %s%% (%d/%d executed lines stable)\n" \
       "$pct" "$stable_count" "$total_lines"
 
