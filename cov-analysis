@@ -109,6 +109,31 @@ extract_binary() {
   return $rc
 }
 
+# Return 0 if the binary was built from the cov-analysis driver
+# (coverage_driver.c). Such binaries embed a fixed signature string and read
+# their inputs from file arguments (the @@ placeholder), never from stdin.
+is_cov_driver_binary() {
+  local bin="$1"
+  test -n "$bin" || return 1
+  grep -qaF '###SIGNATURE_LLVMFUZZERTESTONEINPUT_COVERAGE###' "$bin" 2>/dev/null
+}
+
+# If the coverage command has no @@ placeholder but the binary is a cov-analysis
+# driver (argv-only input), append @@ so the forgotten placeholder is supplied
+# automatically. Echoes the (possibly adjusted) command. A trailing @@ also lets
+# the replay use fast batch mode.
+add_at_if_driver() {
+  local cmd="$1" bin="$2"
+  case "$cmd" in
+    *@@*) printf '%s' "$cmd"; return 0 ;;
+  esac
+  if is_cov_driver_binary "$bin"; then
+    printf '%s @@' "$cmd"
+  else
+    printf '%s' "$cmd"
+  fi
+}
+
 # Classify $AFL_DIR as one of:
 #   afl    — AFL++ layout: <dir>/queue or <dir>/*/queue exists
 #   flat   — libFuzzer/libafl/honggfuzz flat corpus or crash dir (≥1 regular file)
@@ -369,7 +394,9 @@ Usage: cov-analysis [report] [options]
 Required:
   -d <dir>    Fuzzing output directory (AFL++, libFuzzer, libafl, or honggfuzz)
   -e <cmd>    Coverage command. Use @@ as input file placeholder.
-              Omit @@ to feed input via stdin instead.
+              Omit @@ to feed input via stdin instead. For a cov-analysis
+              driver binary (which reads files, not stdin), @@ is appended
+              automatically when omitted.
 
 Optional:
   -o <dir>           Report output directory (default: <afl-dir>/cov)
@@ -493,7 +520,9 @@ Usage: cov-analysis stability [options]
 Required:
   -d <dir>    Fuzzing output directory (AFL++, libFuzzer, libafl, or honggfuzz)
   -e <cmd>    Coverage command. Use @@ as input file placeholder.
-              Omit @@ to feed input via stdin instead.
+              Omit @@ to feed input via stdin instead. For a cov-analysis
+              driver binary (which reads files, not stdin), @@ is appended
+              automatically when omitted.
 
 Optional:
   -n <num>           Number of runs per corpus pass (default: 4)
@@ -529,7 +558,9 @@ Required:
   FILE:LINE   Source location, e.g. src/foo.c:123 (single line; split on last ':')
   -d <dir>    Fuzzing output directory (AFL++, libFuzzer, libafl, or honggfuzz)
   -e <cmd>    Coverage command. Use @@ as input file placeholder.
-              Omit @@ to feed input via stdin instead.
+              Omit @@ to feed input via stdin instead. For a cov-analysis
+              driver binary (which reads files, not stdin), @@ is appended
+              automatically when omitted.
 
 Optional:
   --crashes          Also scan crash and timeout inputs (default: corpus only)
@@ -706,6 +737,10 @@ cmd_stability() {
     exit 1
   fi
   logv "Coverage binary : $COV_BINARY"
+
+  # Forgotten @@ on a driver binary → supply it automatically (argv-only input).
+  COVERAGE_CMD="$(add_at_if_driver "$COVERAGE_CMD" "$COV_BINARY")"
+  logv "Replay command  : $COVERAGE_CMD"
 
   # ── detect LLVM tools ──────────────────────────────────────────────────────
   LLVM_PROFDATA="$(find_tool llvm-profdata)" || {
@@ -1001,7 +1036,7 @@ _search_replay_union() {
     *@@*)
       local LAST_TOKEN="${COVERAGE_CMD##* }"
       if test "$LAST_TOKEN" = "@@"; then
-        if ! grep -qaF '###SIGNATURE_LLVMFUZZERTESTONEINPUT_COVERAGE###' "$COV_BINARY" 2>/dev/null; then
+        if ! is_cov_driver_binary "$COV_BINARY"; then
           LAST_TOKEN="x"
         fi
       fi
@@ -1145,6 +1180,10 @@ cmd_search() {
   if ! test -x "$COV_BINARY"; then
     err "Coverage binary not found or not executable: $COV_BINARY"; exit 1
   fi
+
+  # Forgotten @@ on a driver binary → supply it automatically (argv-only input).
+  COVERAGE_CMD="$(add_at_if_driver "$COVERAGE_CMD" "$COV_BINARY")"
+  logv "Replay command  : $COVERAGE_CMD"
 
   # ── detect LLVM tools ────────────────────────────────────────────────────
   LLVM_PROFDATA="$(find_tool llvm-profdata)" || {
@@ -1803,6 +1842,9 @@ cmd_report() {
     exit 1
   fi
   logv "Coverage binary: $COV_BINARY"
+
+  # Forgotten @@ on a driver binary → supply it automatically (argv-only input).
+  COVERAGE_CMD="$(add_at_if_driver "$COVERAGE_CMD" "$COV_BINARY")"
   logv "Coverage command: $COVERAGE_CMD"
 
   test -z "$REPORT_DIR" && REPORT_DIR="$AFL_DIR/cov"
@@ -1876,7 +1918,7 @@ cmd_report() {
       # Determine if @@ is the last token (enables fast batch mode)
       local LAST_TOKEN="${COVERAGE_CMD##* }"
       if test "$LAST_TOKEN" = "@@"; then
-        if ! grep -qaF '###SIGNATURE_LLVMFUZZERTESTONEINPUT_COVERAGE###' "$COV_BINARY" 2>/dev/null; then
+        if ! is_cov_driver_binary "$COV_BINARY"; then
           LAST_TOKEN="x"
         fi
       fi
