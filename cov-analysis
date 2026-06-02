@@ -842,6 +842,8 @@ cmd_stability() {
     fi
   done
 
+  log "Collected all data, analyzing ..."
+
   # Comparing hit counts across runs needs at least two successful passes.
   if test "${#stab_passes[@]}" -lt 2; then
     err "Only ${#stab_passes[@]} of $RUNS pass(es) produced coverage data — need at least 2 to assess stability."
@@ -1256,6 +1258,14 @@ cmd_search() {
 
 cmd_diff() {
   local REPORT_DIR="."
+  # With no arguments and no default reports to diff in the current directory,
+  # there is nothing to do — print help instead of erroring (as if -h).
+  if test $# -eq 0 \
+     && ! test -s "./coverage.json" \
+     && ! test -s "./coverage_old.json"; then
+    usage_diff
+    exit 0
+  fi
   case "${1-}" in
     -o)        need_arg "-o" "${2-}"; REPORT_DIR="$2"; shift 2 ;;
     -h|--help) usage_diff; exit 0 ;;

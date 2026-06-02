@@ -169,7 +169,7 @@ The report is written to `<report-dir>/coverage_diff.html` and shows:
 - Newly covered and lost functions
 - Source code snippets annotated with coverage change
 
-If the JSON paths are omitted, `cov-analysis diff` defaults to `<report-dir>/coverage_old.json` and `<report-dir>/coverage.json`.
+If the JSON paths are omitted, `cov-analysis diff` defaults to `<report-dir>/coverage_old.json` and `<report-dir>/coverage.json`. Run with no arguments and neither default report present in the current directory, it prints the help instead of an error.
 
 The HTML diff report looks like this:
 
