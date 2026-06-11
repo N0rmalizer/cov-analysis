@@ -14,7 +14,7 @@ assert_eq() {
 assert_count() {
   local want="$1" label="$2"
   local got
-  got=$(tr -cd '\0' | wc -c)
+  got=$(tr -cd '\0' | wc -c | awk '{print $1}')
   assert_eq "$got" "$want" "$label"
 }
 
@@ -71,7 +71,7 @@ mkfixture_honggfuzz() {
 }
 
 # mktmp — returns a tempdir path; auto-cleanup on EXIT via caller's trap
-mktmp() { mktemp -d "/tmp/afl-cov-test.XXXXXX"; }
+mktmp() { mktemp -d "${TMPDIR:-/tmp}/afl-cov-test.XXXXXX"; }
 
 # detect_clang — echo a usable clang binary name (clang or clang-NN), return 1
 # if none is found. Used by toolchain-gated integration tests to skip cleanly.
