@@ -264,7 +264,9 @@ Usage: cov-analysis [report] [options]
 Required:
   -d <dir>    Fuzzing output directory (AFL++, libFuzzer, libafl, or honggfuzz)
   -e <cmd>    Coverage command. Use @@ as input file placeholder.
-              Omit @@ to feed input via stdin instead.
+              Omit @@ to feed input via stdin instead. For a cov-analysis
+              driver binary (which reads files, not stdin), @@ is appended
+              automatically when omitted.
 
 Optional:
   -o <dir>           Report output directory (default: <afl-dir>/cov)
@@ -334,7 +336,9 @@ Usage: cov-analysis stability [options]
 Required:
   -d <dir>    Fuzzing output directory (AFL++, libFuzzer, libafl, or honggfuzz)
   -e <cmd>    Coverage command. Use @@ as input file placeholder.
-              Omit @@ to feed input via stdin instead.
+              Omit @@ to feed input via stdin instead. For a cov-analysis
+              driver binary (which reads files, not stdin), @@ is appended
+              automatically when omitted.
 
 Optional:
   -n <num>           Number of runs per corpus pass (default: 4)
@@ -372,7 +376,9 @@ Required:
   FILE:LINE   Source location, e.g. src/foo.c:123 (single line)
   -d <dir>    Fuzzing output directory (AFL++, libFuzzer, libafl, or honggfuzz)
   -e <cmd>    Coverage command. Use @@ as input file placeholder.
-              Omit @@ to feed input via stdin instead.
+              Omit @@ to feed input via stdin instead. For a cov-analysis
+              driver binary (which reads files, not stdin), @@ is appended
+              automatically when omitted.
 
 Optional:
   --crashes          Also scan crash and timeout inputs (default: corpus only)
