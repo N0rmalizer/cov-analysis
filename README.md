@@ -59,6 +59,8 @@ Override auto-detection with `--layout afl|flat`.
 
 ## Workflow
 
+Note: `cov-analysis` uses the `TMPDIR` environment variable if present.
+
 ### Step 1: Build a Coverage Binary
 
 Use `cov-analysis build` to set the correct compiler flags and build your target:
