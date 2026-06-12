@@ -32,6 +32,11 @@ err()  { echo "[-] $*" >&2; }
 loge() { test "$QUIET" -eq 0 && echo "[+] $*" >&2 || true; }
 logerr() { test "$QUIET" -eq 0 && echo "[-] $*" >&2 || true; }
 
+# Use TMPDIR when provided, otherwise fallback to /tmp default.
+tmp_base_dir() {
+  printf '%s' "${TMPDIR:-/tmp}"
+}
+
 # Validate an option's value. Prints error and exits 1 if $2 is missing or
 # begins with '-'. Usage: need_arg <opt-name> <value-or-empty>
 need_arg() {
@@ -783,7 +788,7 @@ cmd_stability() {
   esac
 
   # ── prepare workspace ──────────────────────────────────────────────────────
-  STAB_DIR="$(mktemp -d /tmp/cov-analysis-stability.XXXXXX)"
+  STAB_DIR="$(mktemp -d "$(tmp_base_dir)/cov-analysis-stability.XXXXXX")"
   trap "rm -rf '$STAB_DIR'" EXIT INT TERM
 
   local CORPUS_SIZE
@@ -1224,7 +1229,7 @@ cmd_search() {
 
   # ── workspace ──────────────────────────────────────────────────────────────
   local SEARCH_DIR
-  SEARCH_DIR="$(mktemp -d /tmp/cov-analysis-search.XXXXXX)"
+  SEARCH_DIR="$(mktemp -d "$(tmp_base_dir)/cov-analysis-search.XXXXXX")"
   trap "rm -rf '$SEARCH_DIR'" EXIT INT TERM
 
   # ── union pre-check ────────────────────────────────────────────────────────
@@ -1876,7 +1881,7 @@ cmd_report() {
   esac
 
   # ── prepare workspace ──────────────────────────────────────────────────────
-  PROFRAW_DIR="$(mktemp -d /tmp/cov-analysis-profraw.XXXXXX)"
+  PROFRAW_DIR="$(mktemp -d "$(tmp_base_dir)/cov-analysis-profraw.XXXXXX")"
   trap "rm -rf '$PROFRAW_DIR'" EXIT INT TERM
 
   # Guard against nuking the filesystem root or a bare "./html" / "./text"
