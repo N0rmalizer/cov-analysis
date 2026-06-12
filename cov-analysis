@@ -32,9 +32,9 @@ err()  { echo "[-] $*" >&2; }
 loge() { test "$QUIET" -eq 0 && echo "[+] $*" >&2 || true; }
 logerr() { test "$QUIET" -eq 0 && echo "[-] $*" >&2 || true; }
 
-# Use COV_ANALYSIS_TMPDIR when provided, otherwise fallback to /tmp default.
+# Use TMPDIR when provided, otherwise fallback to /tmp default.
 tmp_base_dir() {
-  printf '%s' "${COV_ANALYSIS_TMPDIR:-/tmp}"
+  printf '%s' "${TMPDIR:-/tmp}"
 }
 
 # Validate an option's value. Prints error and exits 1 if $2 is missing or
