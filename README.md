@@ -156,6 +156,35 @@ cov-analysis -d /path/to/hfuzz-workdir/ -e "./cov @@"
 
 `SIG*.fuzz` crash files are replayed under the `-T` timeout. The `HONGGFUZZ.REPORT.TXT` metadata file is ignored automatically.
 
+#### Cross-referencing static reachability
+
+If you have run the companion [fuzz-reachability](https://github.com/AFLplusplus/fuzz-reachability)
+analyzer, pass its output with `--reachability` to tell apart coverage gaps that
+are worth chasing from dead weight you can safely ignore:
+
+```bash
+cov-analysis -d /path/to/afl-fuzz-output/ -e "./cov @@" \
+  --reachability /path/to/reachability/test.json
+```
+
+`--reachability` accepts the analyzer's JSON report, its output directory
+(holding `reached.txt` / `not_reached.txt`), or a single SanitizerCoverage
+allow/ignore `.txt` list. An extra `reachability.html` source view is written
+next to the normal report, coloring each function:
+
+- **green** — covered by the corpus
+- **amber** — statically *reachable* but never reached (the actionable gap;
+  a lighter amber marks functions reachable only through over-approximated
+  indirect calls)
+- **dark grey** — statically *unreachable*, so it is expected to stay
+  uncovered — ignore it
+- **purple** — covered yet flagged unreachable (a static-analysis anomaly worth
+  a look, since the analyzer claims it never under-reports)
+
+`cov-analysis diff` accepts the same `--reachability` flag; it splits the
+"still uncovered functions" list into reachable (amber, actionable) and
+unreachable (grey, expected dead).
+
 ### Step 3: Diff Two Coverage Reports
 
 Compare coverage between two `llvm-cov` JSON exports and generate an HTML diff report:
@@ -277,6 +306,11 @@ Optional:
   --layout <kind>    Force layout: 'afl' or 'flat' (default: auto-detect)
   --ignore-regex <r> Filename regex to exclude from llvm-cov reports
                      (default: /usr/include/)
+  --reachability <p> Cross-reference fuzz-reachability output (its JSON report,
+                     output directory, or a sancov allow/ignore .txt list).
+                     Emits reachability.html coloring functions: green=covered,
+                     amber=reachable but not reached, dark grey=unreachable,
+                     purple=covered yet flagged unreachable.
   -v                 Verbose output
   -q                 Quiet mode
   -V                 Print version and exit
@@ -311,13 +345,17 @@ Options:
 ### cov-analysis diff
 
 ```
-Usage: cov-analysis diff [<OLD_JSON> <NEW_JSON>]
+Usage: cov-analysis diff [-o <dir>] [--reachability <p>] [<OLD_JSON> <NEW_JSON>]
 
   Compare coverage between two llvm-cov JSON exports and generate an
   HTML diff report showing newly covered, lost, and still-uncovered
   lines and functions.
 
   Defaults to <report-dir>/coverage_old.json and <report-dir>/coverage.json.
+
+  --reachability <p> cross-references fuzz-reachability output (JSON, output
+  directory, or a sancov .txt list) and splits the still-uncovered functions
+  into reachable (amber, actionable) vs unreachable (grey, expected dead).
 ```
 
 ### cov-analysis stability
