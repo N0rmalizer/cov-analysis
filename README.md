@@ -169,10 +169,11 @@ cov-analysis -d /path/to/afl-fuzz-output/ -e "./cov @@" \
 
 `--reachability` accepts the analyzer's JSON report, its output directory
 (holding `reached.txt` / `not_reached.txt`), or a single SanitizerCoverage
-allow/ignore `.txt` list. An extra `reachability.html` source view is written
-next to the normal report, coloring each function:
+allow/ignore `.txt` list. The normal `llvm-cov` HTML and text reports are
+annotated **in place** (no separate report). In the HTML file view each
+function's lines are tinted:
 
-- **green** — covered by the corpus
+- **covered** — keeps `llvm-cov`'s usual coloring
 - **amber** — statically *reachable* but never reached (the actionable gap;
   a lighter amber marks functions reachable only through over-approximated
   indirect calls)
@@ -181,9 +182,14 @@ next to the normal report, coloring each function:
 - **purple** — covered yet flagged unreachable (a static-analysis anomaly worth
   a look, since the analyzer claims it never under-reports)
 
+The HTML `index.html` gains a tally banner. The text source view (`text/`) gets
+a per-line marker column (`U` unreachable, `R` reachable-but-unreached,
+`A` anomaly), and `summary.txt` gains a reachability tally plus the explicit
+list of reachable-but-not-reached functions to go after.
+
 `cov-analysis diff` accepts the same `--reachability` flag; it splits the
-"still uncovered functions" list into reachable (amber, actionable) and
-unreachable (grey, expected dead).
+"still uncovered functions" list in the diff report into reachable (amber,
+actionable) and unreachable (grey, expected dead).
 
 ### Step 3: Diff Two Coverage Reports
 
@@ -307,10 +313,11 @@ Optional:
   --ignore-regex <r> Filename regex to exclude from llvm-cov reports
                      (default: /usr/include/)
   --reachability <p> Cross-reference fuzz-reachability output (its JSON report,
-                     output directory, or a sancov allow/ignore .txt list).
-                     Emits reachability.html coloring functions: green=covered,
+                     output directory, or a sancov allow/ignore .txt list) and
+                     annotate the HTML + text reports in place: functions tinted
                      amber=reachable but not reached, dark grey=unreachable,
-                     purple=covered yet flagged unreachable.
+                     purple=covered yet flagged unreachable; text gets a U/R/A
+                     marker column and summary.txt a reachability tally.
   -v                 Verbose output
   -q                 Quiet mode
   -V                 Print version and exit

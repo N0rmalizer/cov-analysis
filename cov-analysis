@@ -410,13 +410,16 @@ Optional:
   --layout <kind>    Force layout: 'afl' or 'flat' (default: auto-detect)
   --ignore-regex <r> Filename regex to exclude from llvm-cov reports
                      (default: /usr/include/)
-  --reachability <p> Cross-reference fuzz-reachability output. <p> is its JSON
-                     report, its output directory (reached.txt/not_reached.txt),
-                     or a single sancov allow/ignore .txt list. Emits an extra
-                     reachability.html source view that colors each function:
-                     green = covered, amber = reachable but not reached (the
-                     actionable gap), dark grey = statically unreachable
-                     (expected dead), purple = covered yet flagged unreachable.
+  --reachability <p> Cross-reference fuzz-reachability output and annotate the
+                     HTML and text reports in place. <p> is its JSON report, its
+                     output directory (reached.txt/not_reached.txt), or a single
+                     sancov allow/ignore .txt list. In the HTML file view each
+                     function is tinted: dark grey = statically unreachable
+                     (expected dead), amber = reachable but not reached (the
+                     actionable gap), purple = covered yet flagged unreachable;
+                     covered code keeps llvm-cov's coloring. The text source view
+                     gets a per-line U/R/A marker column, and summary.txt gains a
+                     reachability tally plus the list of functions to cover.
   -v                 Verbose output
   -q                 Quiet mode (suppress all [+] output)
   -V                 Print version and exit
@@ -1887,29 +1890,33 @@ PYEOF
   exit 0
 }
 
-# ── reachability-annotated report ───────────────────────────────────────────
-# render_reachability_html <coverage.json> <reachability-path> <out.html>
+# ── reachability annotation of llvm-cov reports ──────────────────────────────
+# annotate_reachability <coverage.json> <reachability-path> <html-dir> <text-dir> <summary.txt>
 #
-# Cross llvm-cov coverage with the fuzz-reachability tool's output to classify
-# each function and emit a colored per-file source view. <reachability-path>
-# is one of: a .json report (rich: carries indirect_only + file/line), a
-# directory holding reached.txt / not_reached.txt, or a single allow/ignore
-# .txt list. Self-contained inline Python, like cmd_diff.
-render_reachability_html() {
-  local COVJSON="$1" REACH="$2" OUT="$3"
-  python3 - "$COVJSON" "$REACH" "$OUT" << 'PYEOF'
+# Cross llvm-cov coverage with the fuzz-reachability tool's output and annotate
+# the reports llvm-cov already produced, in place: tint each function's lines in
+# the HTML file view (dark grey = unreachable, amber = reachable but not reached,
+# purple = covered-yet-unreachable), add a per-line U/R/A marker column to the
+# text source view, and append a tally + actionable list to summary.txt. Prints
+# a one-line tally to stdout. <reachability-path> is a .json report, a directory
+# holding reached.txt / not_reached.txt, or a single allow/ignore .txt list.
+# Self-contained inline Python, like cmd_diff.
+annotate_reachability() {
+  local COVJSON="$1" REACH="$2" HTML_DIR="$3" TEXT_DIR="$4" SUMMARY="$5"
+  python3 - "$COVJSON" "$REACH" "$HTML_DIR" "$TEXT_DIR" "$SUMMARY" << 'PYEOF'
 #
 # (c) 2026 Marc "vanHauser" Heuse
 #
 # License: GNU Affero General Public License 3
 #
 
-import html
+import html as htmlmod
 import json
 import os
+import re
 import sys
 
-cov_path, reach_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+cov_path, reach_path, html_dir, text_dir, summary_path = sys.argv[1:6]
 
 
 def load_json(path):
@@ -1919,8 +1926,6 @@ def load_json(path):
 
 # ── parse the reachability input (json | dir | single .txt) ──────────────────
 def parse_txt_list(path):
-    # Returns (kind, names): kind is 'allow'/'ignore'/None from the header
-    # comment; names is the set of fun: symbols.
     names = set()
     kind = None
     with open(path, 'r', encoding='utf-8', errors='replace') as f:
@@ -1976,7 +1981,7 @@ else:
         reachable = names
 
 
-# ── parse coverage functions ─────────────────────────────────────────────────
+# ── parse coverage functions and classify ────────────────────────────────────
 def norm(name):
     # llvm-cov records local-linkage functions as "<src>:<symbol>".
     return name.rsplit(':', 1)[-1]
@@ -2004,23 +2009,7 @@ for obj in cov.get('data', []) or []:
             'end': max(ends),
         })
 
-
-# ── classify each function ────────────────────────────────────────────────────
-STATES = {
-    'covered':                      ('s-covered', 'covered'),
-    'reachable-unreached':          ('s-reachable-unreached', 'reachable, not reached'),
-    'reachable-unreached-indirect': ('s-reachable-unreached-indirect',
-                                     'reachable (indirect only), not reached'),
-    'unreachable':                  ('s-unreachable', 'unreachable (expected dead)'),
-    'anomaly':                      ('s-anomaly', 'covered yet flagged unreachable'),
-    'unknown':                      ('s-unknown', 'not in reachability set'),
-}
-# Line-tinting priority when function spans overlap (rare): most interesting wins.
-PRIORITY = ['unknown', 'covered', 'unreachable',
-            'reachable-unreached', 'reachable-unreached-indirect', 'anomaly']
-
-
-def classify(fn):
+for fn in funcs:
     name, n = fn['name'], fn['norm']
     is_reach = name in reachable or n in reachable
     is_unreach = name in unreachable or n in unreachable
@@ -2031,150 +2020,181 @@ def classify(fn):
         elif st == 'unreachable':
             is_unreach = True
     covered = fn['count'] > 0
+    fn['member'] = 'reachable' if is_reach else ('unreachable' if is_unreach else 'none')
     if covered and is_unreach and not is_reach:
-        return 'anomaly'
-    if covered:
-        return 'covered'
-    if is_reach:
-        if name in indirect or n in indirect:
-            return 'reachable-unreached-indirect'
-        return 'reachable-unreached'
-    if is_unreach:
-        return 'unreachable'
-    return 'unknown'
+        fn['state'] = 'anomaly'
+    elif covered:
+        fn['state'] = 'covered'
+    elif is_reach:
+        fn['state'] = 'reachable-unreached-indirect' if (name in indirect or n in indirect) else 'reachable-unreached'
+    elif is_unreach:
+        fn['state'] = 'unreachable'
+    else:
+        fn['state'] = 'unknown'
 
+t_reachable = sum(1 for f in funcs if f['member'] == 'reachable')
+t_unreachable = sum(1 for f in funcs if f['member'] == 'unreachable')
+t_unreached = sum(1 for f in funcs if f['state'] in ('reachable-unreached', 'reachable-unreached-indirect'))
+t_anomaly = sum(1 for f in funcs if f['state'] == 'anomaly')
+actionable = sorted({f['name'] for f in funcs if f['state'] in ('reachable-unreached', 'reachable-unreached-indirect')})
 
-for fn in funcs:
-    fn['state'] = classify(fn)
-
-totals = {k: 0 for k in STATES}
-for fn in funcs:
-    totals[fn['state']] += 1
-
-
-def read_source(filename):
-    try:
-        with open(filename, 'r', encoding='utf-8', errors='replace') as f:
-            return f.read().splitlines()
-    except OSError:
-        return []
+# ── per-file line -> state map ────────────────────────────────────────────────
+PRIORITY = ['unknown', 'covered', 'unreachable',
+            'reachable-unreached', 'reachable-unreached-indirect', 'anomaly']
 
 
 def better(a, b):
     return a if PRIORITY.index(a) >= PRIORITY.index(b) else b
 
 
-# group functions by file
-by_file = {}
+line_state = {}
 for fn in funcs:
-    by_file.setdefault(fn['file'], []).append(fn)
+    d = line_state.setdefault(fn['file'], {})
+    for ln in range(fn['start'], fn['end'] + 1):
+        d[ln] = better(d.get(ln, 'unknown'), fn['state'])
 
 
-def render_file(filename, file_funcs):
-    file_funcs = sorted(file_funcs, key=lambda f: f['start'])
-    parts = []
-    fid = html.escape(filename, quote=True).replace('/', '_').replace(' ', '_')
-    parts.append(f'<section class="file" id="{fid}">')
-    parts.append(f'<h2>{html.escape(filename)}</h2>')
+def states_for(srcfile):
+    return line_state.get(srcfile) or line_state.get(os.path.basename(srcfile))
 
-    # function index — one greppable row per function (data-fn + state class)
-    parts.append('<ul class="fn-index">')
-    for fn in file_funcs:
-        cls, label = STATES[fn['state']]
-        parts.append(
-            f'<li class="fn-row {cls}" data-fn="{html.escape(fn["name"], quote=True)}">'
-            f'<span class="fn-name">{html.escape(fn["name"])}</span>'
-            f'<span class="fn-loc">L{fn["start"]}–{fn["end"]}</span>'
-            f'<span class="fn-state">{html.escape(label)}</span></li>'
-        )
-    parts.append('</ul>')
 
-    # source view — tint each line by the function that owns it
-    src = read_source(filename)
-    if src:
-        line_state = {}
-        for fn in file_funcs:
-            for ln in range(fn['start'], min(fn['end'], len(src)) + 1):
-                line_state[ln] = better(line_state.get(ln, 'unknown'), fn['state'])
-        parts.append('<table class="code">')
-        for i, text in enumerate(src, start=1):
-            st = line_state.get(i)
-            cls = STATES[st][0] if st and st != 'unknown' else ''
-            parts.append(
-                f'<tr class="{cls}"><td class="ln">{i}</td>'
-                f'<td class="src"><pre>{html.escape(text)}</pre></td></tr>'
+HTML_CLASS = {
+    'reachable-unreached': 'reach-amber',
+    'reachable-unreached-indirect': 'reach-amber-indirect',
+    'unreachable': 'reach-grey',
+    'anomaly': 'reach-anomaly',
+}
+TEXT_MARK = {
+    'unreachable': 'U',
+    'reachable-unreached': 'R',
+    'reachable-unreached-indirect': 'R',
+    'anomaly': 'A',
+}
+
+# ── annotate the HTML file view ───────────────────────────────────────────────
+covdir = os.path.join(html_dir, 'coverage')
+if os.path.isdir(covdir):
+    for root, _, files in os.walk(covdir):
+        for fname in files:
+            if not fname.endswith('.html'):
+                continue
+            path = os.path.join(root, fname)
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                doc = f.read()
+            m = re.search(r"source-name-title'><pre>(.*?)</pre>", doc, re.S)
+            if not m:
+                continue
+            states = states_for(htmlmod.unescape(m.group(1)).strip())
+            if not states:
+                continue
+
+            def repl(mt, states=states):
+                seg = mt.group(0)
+                lm = re.search(r"name='L(\d+)'", seg)
+                if not lm:
+                    return seg
+                cls = HTML_CLASS.get(states.get(int(lm.group(1))))
+                if not cls:
+                    return seg
+                return seg.replace('<tr>', "<tr class='%s'>" % cls, 1)
+
+            doc = re.sub(r"<tr>.*?</tr>", repl, doc, flags=re.S)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(doc)
+
+# Append the CSS rules once to the shared stylesheet.
+css_path = os.path.join(html_dir, 'style.css')
+css_marker = 'cov-analysis reachability annotation'
+css_rules = """
+/* %s */
+tr.reach-grey td { background-color: #d0d0d0 !important; color: #777 !important; }
+tr.reach-grey .red { background-color: #d0d0d0 !important; color: #777 !important; }
+tr.reach-amber td.code { background-color: #fff3d6 !important; }
+tr.reach-amber-indirect td.code { background-color: #fff8e8 !important; }
+tr.reach-anomaly td.code { background-color: #f3e8fd !important; }
+""" % css_marker
+if os.path.isfile(css_path):
+    with open(css_path, 'r', encoding='utf-8', errors='replace') as f:
+        cur = f.read()
+    if css_marker not in cur:
+        with open(css_path, 'a', encoding='utf-8') as f:
+            f.write(css_rules)
+
+# Inject a tally banner into index.html.
+idx = os.path.join(html_dir, 'index.html')
+if os.path.isfile(idx):
+    with open(idx, 'r', encoding='utf-8', errors='replace') as f:
+        doc = f.read()
+    if 'reach-banner' not in doc:
+        banner = (
+            "<div class='reach-banner' style='margin:10px;padding:8px 12px;"
+            "border:1px solid #ccc;border-radius:6px;font-family:sans-serif'>"
+            "<b>Reachability</b> (vs %s): %d reachable, "
+            "<span style='background:#fff3d6'>%d not yet reached</span> (amber), "
+            "<span style='background:#d0d0d0'>%d unreachable</span> (grey)%s"
+            "</div>" % (
+                htmlmod.escape(os.path.basename(reach_path)),
+                t_reachable, t_unreached, t_unreachable,
+                (", <span style='background:#f3e8fd'>%d covered-yet-unreachable</span>" % t_anomaly) if t_anomaly else "",
             )
-        parts.append('</table>')
-    else:
-        parts.append('<p class="muted">Source file not readable on disk.</p>')
-    parts.append('</section>')
-    return ''.join(parts)
+        )
+        doc = doc.replace('<body>', '<body>' + banner, 1)
+        with open(idx, 'w', encoding='utf-8') as f:
+            f.write(doc)
 
+# ── annotate the text source view ─────────────────────────────────────────────
+tcovdir = os.path.join(text_dir, 'coverage')
+src_re = re.compile(r'^(\s*\d+\|[^|]*\|)(.*)$')
+legend = '# reachability:  U=unreachable (dead)   R=reachable, not reached   A=covered yet unreachable'
+if os.path.isdir(tcovdir):
+    for root, _, files in os.walk(tcovdir):
+        for fname in files:
+            if not fname.endswith('.txt'):
+                continue
+            path = os.path.join(root, fname)
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                lines = f.read().split('\n')
+            out = []
+            cur = None
+            for line in lines:
+                m = src_re.match(line)
+                if m and cur is not None:
+                    ln = int(line.split('|', 1)[0].strip())
+                    mark = TEXT_MARK.get(cur.get(ln), ' ')
+                    out.append(m.group(1) + mark + ' ' + m.group(2))
+                    continue
+                stripped = line.rstrip()
+                head = stripped.lstrip()
+                if stripped.endswith(':') and not (head[:1].isdigit()):
+                    cur = states_for(stripped[:-1].strip())
+                    out.append(line)
+                    if cur:
+                        out.append(legend)
+                    continue
+                out.append(line)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(out))
 
-# order files: those with actionable (reachable-unreached / anomaly) funcs first
-def file_weight(funcs_in_file):
-    return -sum(1 for f in funcs_in_file
-                if f['state'] in ('reachable-unreached', 'reachable-unreached-indirect', 'anomaly'))
+# ── append the summary block to summary.txt ───────────────────────────────────
+if os.path.isfile(summary_path):
+    block = []
+    block.append('')
+    block.append('== Reachability (vs %s) ==' % os.path.basename(reach_path))
+    block.append('  reachable functions          : %d' % t_reachable)
+    block.append('    of which not yet reached   : %d   <- amber, cover these' % t_unreached)
+    block.append('  unreachable functions        : %d   <- dark grey, expected dead' % t_unreachable)
+    if t_anomaly:
+        block.append('  covered yet unreachable      : %d   <- anomaly, investigate' % t_anomaly)
+    block.append('')
+    if actionable:
+        block.append('Reachable but NOT reached (actionable):')
+        block.extend('  ' + name for name in actionable)
+        block.append('')
+    with open(summary_path, 'a', encoding='utf-8') as f:
+        f.write('\n'.join(block) + '\n')
 
-
-sections = ''.join(
-    render_file(fname, by_file[fname])
-    for fname in sorted(by_file, key=lambda f: (file_weight(by_file[f]), f))
-)
-
-legend = ''.join(
-    f'<span class="chip {STATES[k][0]}">{html.escape(STATES[k][1])}: {totals[k]}</span>'
-    for k in ['covered', 'reachable-unreached', 'reachable-unreached-indirect',
-              'unreachable', 'anomaly', 'unknown'] if totals[k]
-)
-
-doc = f'''<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Reachability-annotated coverage</title>
-<style>
-body {{ margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #f6f7f9; color: #1c2128; }}
-header {{ padding: 20px 24px; background: #fff; border-bottom: 1px solid #e1e4e8; position: sticky; top: 0; }}
-h1 {{ font-size: 18px; margin: 0 0 10px; }}
-h2 {{ font-size: 14px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 24px 24px 8px; }}
-.legend {{ display: flex; flex-wrap: wrap; gap: 8px; }}
-.chip {{ font-size: 12px; padding: 3px 8px; border-radius: 10px; border: 1px solid #d0d7de; }}
-.fn-index {{ list-style: none; margin: 0 24px; padding: 0; }}
-.fn-row {{ display: flex; gap: 14px; padding: 4px 10px; border-left: 4px solid transparent; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }}
-.fn-loc {{ color: #6e7781; }}
-.fn-state {{ color: #6e7781; margin-left: auto; }}
-table.code {{ width: calc(100% - 48px); margin: 8px 24px 8px; border-collapse: collapse; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }}
-table.code td.ln {{ width: 56px; text-align: right; padding: 0 10px; color: #8c959f; user-select: none; border-right: 1px solid #eaecef; }}
-table.code td.src {{ padding: 0 10px; white-space: pre; }}
-table.code pre {{ margin: 0; }}
-.muted {{ color: #6e7781; margin: 8px 24px; }}
-/* state colors — covered green, reachable-unreached amber, unreachable dark grey, anomaly purple */
-.s-covered {{ background: #e6f4ea; border-left-color: #2da44e; }}
-.s-reachable-unreached {{ background: #fff3d6; border-left-color: #e8a33d; }}
-.s-reachable-unreached-indirect {{ background: #fff8e8; border-left-color: #f0c987; }}
-.s-unreachable {{ background: #e3e3e3; border-left-color: #6e7781; color: #6e7781; }}
-.s-anomaly {{ background: #f3e8fd; border-left-color: #9b59b6; }}
-footer {{ color: #6e7781; padding: 16px 24px; font-size: 12px; }}
-</style>
-</head>
-<body>
-<header>
-<h1>Reachability-annotated coverage</h1>
-<div class="legend">{legend}</div>
-</header>
-{sections}
-<footer>Coverage from llvm-cov export JSON, cross-referenced with fuzz-reachability.
-Amber = the fuzzer can statically reach this function but the corpus never did (actionable gap).
-Dark grey = statically unreachable, expected to stay uncovered.</footer>
-</body>
-</html>'''
-
-out = os.path.abspath(out_path)
-os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
-with open(out, 'w', encoding='utf-8') as f:
-    f.write(doc)
+print('reachable=%d not-reached=%d unreachable=%d anomaly=%d'
+      % (t_reachable, t_unreached, t_unreachable, t_anomaly))
 PYEOF
 }
 
@@ -2466,15 +2486,15 @@ cmd_report() {
     exit 1
   }
 
-  # ── reachability-annotated report (optional) ───────────────────────────────
-  local REACH_HTML=""
+  # ── reachability annotation (optional) ─────────────────────────────────────
   if test -n "$REACHABILITY"; then
-    log "Generating reachability-annotated report..."
-    if render_reachability_html "$REPORT_DIR/coverage.json" "$REACHABILITY" \
-         "$REPORT_DIR/reachability.html"; then
-      REACH_HTML="$REPORT_DIR/reachability.html"
+    log "Annotating reports with reachability..."
+    local REACH_TALLY=""
+    if REACH_TALLY="$(annotate_reachability "$REPORT_DIR/coverage.json" "$REACHABILITY" \
+         "$REPORT_DIR/html" "$REPORT_DIR/text" "$REPORT_DIR/summary.txt")"; then
+      log "Reachability: $REACH_TALLY"
     else
-      err "Reachability report generation failed (continuing without it)."
+      err "Reachability annotation failed (continuing without it)."
     fi
   fi
 
@@ -2487,7 +2507,6 @@ cmd_report() {
       echo ""
     fi
     echo "[+] HTML report  : file://$REPORT_DIR/html/index.html"
-    test -n "$REACH_HTML" && echo "[+] Reachability : file://$REACH_HTML"
     echo "[+] Text report  : $REPORT_DIR/text/"
     echo "[+] Summary      : $REPORT_DIR/summary.txt"
     echo "[+] JSON export  : $REPORT_DIR/coverage.json"
