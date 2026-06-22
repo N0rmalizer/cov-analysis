@@ -420,6 +420,12 @@ Optional:
                      covered code keeps llvm-cov's coloring. The text source view
                      gets a per-line U/R/A marker column, and summary.txt gains a
                      reachability tally plus the list of functions to cover.
+                     The Function/Line/Region/Branch coverage numbers in
+                     index.html and summary.txt are recomputed to EXCLUDE
+                     statically-unreachable functions, so dead code no longer
+                     drags the percentages down. (The HTML index is rendered
+                     flat — without directory grouping — so its numbers can be
+                     rewritten reliably.)
   -v                 Verbose output
   -q                 Quiet mode (suppress all [+] output)
   -V                 Print version and exit
@@ -1902,8 +1908,8 @@ PYEOF
 # holding reached.txt / not_reached.txt, or a single allow/ignore .txt list.
 # Self-contained inline Python, like cmd_diff.
 annotate_reachability() {
-  local COVJSON="$1" REACH="$2" HTML_DIR="$3" TEXT_DIR="$4" SUMMARY="$5"
-  python3 - "$COVJSON" "$REACH" "$HTML_DIR" "$TEXT_DIR" "$SUMMARY" << 'PYEOF'
+  local COVJSON="$1" REACH="$2" HTML_DIR="$3" TEXT_DIR="$4" SUMMARY="$5" PERFUNC="${6:-}"
+  python3 - "$COVJSON" "$REACH" "$HTML_DIR" "$TEXT_DIR" "$SUMMARY" "$PERFUNC" << 'PYEOF'
 #
 # (c) 2026 Marc "vanHauser" Heuse
 #
@@ -1917,6 +1923,7 @@ import re
 import sys
 
 cov_path, reach_path, html_dir, text_dir, summary_path = sys.argv[1:6]
+perfunc_path = sys.argv[6] if len(sys.argv) > 6 else ''
 
 
 def load_json(path):
@@ -2175,23 +2182,188 @@ if os.path.isdir(tcovdir):
             with open(path, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(out))
 
-# ── append the summary block to summary.txt ───────────────────────────────────
-if os.path.isfile(summary_path):
-    block = []
+# ── recompute coverage numbers excluding unreachable functions ────────────────
+# Per-function Regions/Lines/Branches come from `llvm-cov report -show-functions`
+# (authoritative; they sum to llvm-cov's own totals). We re-sum over the kept
+# functions (everything except those flagged unreachable) so every denominator
+# drops the statically-dead code. file_metrics: absfile -> dict of totals.
+def reach_member(name):
+    n = name.rsplit(':', 1)[-1]
+    if name in unreachable or n in unreachable:
+        return 'unreachable'
+    if name in reachable or n in reachable:
+        return 'reachable'
+    return 'none'
+
+
+file_metrics = {}
+
+
+def blank_metric():
+    return {'fn': 0, 'fn_cov': 0, 'reg': 0, 'reg_cov': 0,
+            'line': 0, 'line_cov': 0, 'br': 0, 'br_cov': 0}
+
+
+def parse_perfunc(path):
+    cur = None
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        for line in f:
+            s = line.rstrip('\n')
+            mh = re.match(r"^File '(.*)':\s*$", s.strip())
+            if mh:
+                cur = mh.group(1)
+                file_metrics.setdefault(cur, blank_metric())
+                continue
+            toks = s.split()
+            if cur is None or len(toks) < 10:
+                continue
+            name = toks[0]
+            if name in ('Name', 'TOTAL') or set(name) == {'-'}:
+                continue
+            try:
+                reg, reg_m = int(toks[1]), int(toks[2])
+                ln, ln_m = int(toks[4]), int(toks[5])
+                br, br_m = int(toks[7]), int(toks[8])
+            except (ValueError, IndexError):
+                continue
+            if reach_member(name) == 'unreachable':
+                continue  # exclude statically-dead functions from every metric
+            m = file_metrics[cur]
+            m['fn'] += 1
+            m['fn_cov'] += 1 if (reg - reg_m) > 0 else 0   # executed iff a region ran
+            m['reg'] += reg
+            m['reg_cov'] += reg - reg_m
+            m['line'] += ln
+            m['line_cov'] += ln - ln_m
+            m['br'] += br
+            m['br_cov'] += br - br_m
+
+
+have_numbers = bool(perfunc_path) and os.path.isfile(perfunc_path)
+if have_numbers:
+    parse_perfunc(perfunc_path)
+
+grand = blank_metric()
+for m in file_metrics.values():
+    for k in grand:
+        grand[k] += m[k]
+
+
+def pct(cov, tot):
+    return (100.0 * cov / tot) if tot else 0.0
+
+
+def cov_color(cov, tot):
+    if tot == 0:
+        return 'column-entry-gray'
+    if cov == tot:
+        return 'column-entry-green'
+    return 'column-entry-red' if pct(cov, tot) < 80.0 else 'column-entry-yellow'
+
+
+def cell_text(cov, tot):
+    if tot == 0:
+        return '- (0/0)'
+    return '%6.2f%% (%d/%d)' % (pct(cov, tot), cov, tot)
+
+
+# ── reachability summary block (always) ───────────────────────────────────────
+block = []
+block.append('')
+block.append('== Reachability (vs %s) ==' % os.path.basename(reach_path))
+block.append('  reachable functions          : %d' % t_reachable)
+block.append('    of which not yet reached   : %d   <- amber, cover these' % t_unreached)
+block.append('  unreachable functions        : %d   <- dark grey, expected dead%s'
+             % (t_unreachable, ' (EXCLUDED from the numbers above)' if have_numbers else ''))
+if t_anomaly:
+    block.append('  covered yet unreachable      : %d   <- anomaly, investigate' % t_anomaly)
+block.append('')
+if actionable:
+    block.append('Reachable but NOT reached (actionable):')
+    block.extend('  ' + name for name in actionable)
     block.append('')
-    block.append('== Reachability (vs %s) ==' % os.path.basename(reach_path))
-    block.append('  reachable functions          : %d' % t_reachable)
-    block.append('    of which not yet reached   : %d   <- amber, cover these' % t_unreached)
-    block.append('  unreachable functions        : %d   <- dark grey, expected dead' % t_unreachable)
-    if t_anomaly:
-        block.append('  covered yet unreachable      : %d   <- anomaly, investigate' % t_anomaly)
-    block.append('')
-    if actionable:
-        block.append('Reachable but NOT reached (actionable):')
-        block.extend('  ' + name for name in actionable)
-        block.append('')
+
+if have_numbers and os.path.isfile(summary_path):
+    # Replace summary.txt with a reachable-only table, then the block above.
+    rows = []
+    rows.append('Reachable-only coverage  (excludes %d statically-unreachable function(s); '
+                'full numbers remain in coverage.json)' % t_unreachable)
+    rows.append('')
+    rows.append('%-50s %-18s %-18s %-18s %-18s'
+                % ('Filename', 'Functions', 'Lines', 'Regions', 'Branches'))
+    rows.append('-' * 122)
+
+    def row_for(label, m):
+        return '%-50s %-18s %-18s %-18s %-18s' % (
+            label,
+            cell_text(m['fn_cov'], m['fn']),
+            cell_text(m['line_cov'], m['line']),
+            cell_text(m['reg_cov'], m['reg']),
+            cell_text(m['br_cov'], m['br']))
+
+    for fname in sorted(file_metrics):
+        rows.append(row_for(fname, file_metrics[fname]))
+    rows.append('-' * 122)
+    rows.append(row_for('TOTAL', grand))
+    with open(summary_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(rows) + '\n' + '\n'.join(block) + '\n')
+elif os.path.isfile(summary_path):
     with open(summary_path, 'a', encoding='utf-8') as f:
         f.write('\n'.join(block) + '\n')
+
+# ── patch the (flat) HTML index tables with the reachable-only numbers ────────
+def derive_absfile(href):
+    # Top-level flat index links files as coverage/<abs-source-path>.html
+    if href.startswith('coverage/') and href.endswith('.html'):
+        return href[len('coverage'):-len('.html')]
+    return None
+
+
+METRIC_CELL = re.compile(r"<td class='column-entry-[^']*'><pre>[^<]*</pre></td>")
+
+
+def patch_index(path):
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        doc = f.read()
+
+    def row_repl(mt):
+        row = mt.group(0)
+        m = None
+        am = re.search(r"<a href='([^']*)'>", row)
+        if am:
+            absf = derive_absfile(am.group(1))
+            if absf and absf in file_metrics:
+                m = file_metrics[absf]
+        elif '<pre>Totals</pre>' in row or '<pre>Total</pre>' in row:
+            m = grand
+        if m is None:
+            return row
+        cells = [
+            (m['fn_cov'], m['fn']), (m['line_cov'], m['line']),
+            (m['reg_cov'], m['reg']), (m['br_cov'], m['br']),
+        ]
+        it = iter(cells)
+
+        def cell_repl(cm):
+            try:
+                cov, tot = next(it)
+            except StopIteration:
+                return cm.group(0)
+            return ("<td class='%s'><pre>%s</pre></td>"
+                    % (cov_color(cov, tot), cell_text(cov, tot)))
+
+        return METRIC_CELL.sub(cell_repl, row)
+
+    doc = re.sub(r"<tr[^>]*>.*?</tr>", row_repl, doc, flags=re.S)
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(doc)
+
+
+if have_numbers:
+    for root, _, files in os.walk(html_dir):
+        for fname in files:
+            if fname == 'index.html':
+                patch_index(os.path.join(root, fname))
 
 print('reachable=%d not-reached=%d unreachable=%d anomaly=%d'
       % (t_reachable, t_unreached, t_unreachable, t_anomaly))
@@ -2445,8 +2617,21 @@ cmd_report() {
     "-ignore-filename-regex=$IGNORE_REGEX"
   )
 
+  # With --reachability the HTML index is rewritten with reachable-only numbers,
+  # which needs the flat single-table index — so drop -show-directory-coverage
+  # (its hierarchical multi-index layout) for the HTML output in that case.
+  local HTML_SHOW_OPTS=("${SHOW_OPTS[@]}")
+  if test -n "$REACHABILITY"; then
+    local _o; local -a _filtered=()
+    for _o in "${HTML_SHOW_OPTS[@]}"; do
+      test "$_o" = "-show-directory-coverage" && continue
+      _filtered+=("$_o")
+    done
+    HTML_SHOW_OPTS=("${_filtered[@]}")
+  fi
+
   log "Generating HTML report..."
-  "$LLVM_COV" show "${SHOW_OPTS[@]}" \
+  "$LLVM_COV" show "${HTML_SHOW_OPTS[@]}" \
     -format=html \
     -output-dir="$REPORT_DIR/html" || {
     err "llvm-cov show (HTML) failed"
@@ -2489,9 +2674,25 @@ cmd_report() {
   # ── reachability annotation (optional) ─────────────────────────────────────
   if test -n "$REACHABILITY"; then
     log "Annotating reports with reachability..."
+    # Per-function metrics let the annotator recompute Function/Line/Region/
+    # Branch coverage excluding statically-unreachable functions.
+    local PERFUNC="$PROFRAW_DIR/perfunc.txt"
+    local -a SRCFILES=()
+    mapfile -t SRCFILES < <(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1]))
+print("\n".join(sorted({f["filename"] for o in d.get("data",[]) for f in o.get("files",[])})))' \
+      "$REPORT_DIR/coverage.json" 2>/dev/null)
+    if test "${#SRCFILES[@]}" -gt 0; then
+      "$LLVM_COV" report "$COV_BINARY" \
+        "-instr-profile=$REPORT_DIR/coverage.profdata" \
+        "-ignore-filename-regex=$IGNORE_REGEX" \
+        -show-functions "${SRCFILES[@]}" > "$PERFUNC" 2>/dev/null || PERFUNC=""
+    else
+      PERFUNC=""
+    fi
     local REACH_TALLY=""
     if REACH_TALLY="$(annotate_reachability "$REPORT_DIR/coverage.json" "$REACHABILITY" \
-         "$REPORT_DIR/html" "$REPORT_DIR/text" "$REPORT_DIR/summary.txt")"; then
+         "$REPORT_DIR/html" "$REPORT_DIR/text" "$REPORT_DIR/summary.txt" "$PERFUNC")"; then
       log "Reachability: $REACH_TALLY"
     else
       err "Reachability annotation failed (continuing without it)."

@@ -65,7 +65,16 @@ EOF
 # ── synthetic llvm-cov HTML output (index + per-file + style.css) ─────────────
 mkdir -p "$TMP/html/coverage" "$TMP/text/coverage"
 printf "/* base */\n" > "$TMP/html/style.css"
-printf "%s" "<!doctype html><html><head></head><body><h2>Coverage Report</h2><table></table></body></html>" > "$TMP/html/index.html"
+# Flat index.html (as llvm-cov emits without -show-directory-coverage): a file
+# row + Totals row, columns Function/Line/Region/Branch. Original numbers here
+# are placeholders the annotator must overwrite with reachable-only figures.
+{
+  printf "%s" "<!doctype html><html><head></head><body><h2>Coverage Report</h2><div class='centered'><table>"
+  printf "%s" "<tr><td class='column-entry-bold'>Filename</td><td class='column-entry-bold'>Function Coverage</td><td class='column-entry-bold'>Line Coverage</td><td class='column-entry-bold'>Region Coverage</td><td class='column-entry-bold'>Branch Coverage</td></tr>"
+  printf "%s" "<tr class='light-row'><td><pre><a href='coverage${TMP}/foo.c.html'>${TMP}/foo.c</a></pre></td><td class='column-entry-red'><pre>  50.00% (2/4)</pre></td><td class='column-entry-red'><pre>  50.00% (6/12)</pre></td><td class='column-entry-red'><pre>  43.75% (7/16)</pre></td><td class='column-entry-gray'><pre>- (0/0)</pre></td></tr>"
+  printf "%s" "<tr class='light-row-bold'><td><pre>Totals</pre></td><td class='column-entry-red'><pre>  50.00% (2/4)</pre></td><td class='column-entry-red'><pre>  50.00% (6/12)</pre></td><td class='column-entry-red'><pre>  43.75% (7/16)</pre></td><td class='column-entry-gray'><pre>- (0/0)</pre></td></tr>"
+  printf "%s\n" "</table></div></body></html>"
+} > "$TMP/html/index.html"
 
 HFILE="$TMP/html/coverage/foo.c.html"
 {
@@ -93,9 +102,24 @@ TFILE="$TMP/text/coverage/foo.c.txt"
 # ── summary.txt (as llvm-cov report would leave it) ──────────────────────────
 printf "Filename  Regions  Missed  Cover\nTOTAL  10  4  60.00%%\n" > "$TMP/summary.txt"
 
-# ── run the annotator ────────────────────────────────────────────────────────
+# ── per-function metrics (as `llvm-cov report -show-functions` emits) ────────
+# covered_fn (reachable, executed), reachable_unreached (reachable, 0),
+# dead_fn (unreachable, 0), anomaly_fn (unreachable but executed). Excluding the
+# two unreachable functions leaves: Functions 1/2, Lines 3/6, Regions 3/8,
+# Branches 1/4.
+cat > "$TMP/perfunc.txt" << EOF
+File '$TMP/foo.c':
+Name                 Regions  Miss  Cover    Lines  Miss  Cover    Branches  Miss  Cover
+covered_fn               4     1   75.00%      3     0  100.00%        2     1   50.00%
+reachable_unreached      4     4    0.00%      3     3    0.00%        2     2    0.00%
+dead_fn                  4     4    0.00%      3     3    0.00%        2     2    0.00%
+anomaly_fn               4     0  100.00%      3     0  100.00%        2     0  100.00%
+TOTAL                   16     9   43.75%     12     6   50.00%        8     5   37.50%
+EOF
+
+# ── run the annotator (6th arg = per-function report → recompute numbers) ────
 TALLY="$(annotate_reachability "$TMP/coverage.json" "$TMP/reach.json" \
-  "$TMP/html" "$TMP/text" "$TMP/summary.txt")" \
+  "$TMP/html" "$TMP/text" "$TMP/summary.txt" "$TMP/perfunc.txt")" \
   || die "annotate_reachability returned non-zero"
 
 # HTML file view: unreachable grey, reachable-unreached (indirect) amber,
@@ -135,6 +159,22 @@ grep -q 'Reachable but NOT reached' "$TMP/summary.txt" || die "summary.txt shoul
 grep -q 'reachable_unreached' "$TMP/summary.txt"       || die "summary.txt should name the actionable function"
 grep -qi 'unreachable functions' "$TMP/summary.txt"    || die "summary.txt should count unreachable functions"
 echo "[PASS] summary.txt block"
+
+# summary.txt: reachable-only coverage table, excluding the 2 unreachable funcs.
+grep -qi 'Reachable-only coverage' "$TMP/summary.txt" || die "summary.txt should carry the reachable-only table"
+grep -q '1/2' "$TMP/summary.txt"  || die "summary.txt: functions should be 1/2 (dead+anomaly excluded)"
+grep -q '3/8' "$TMP/summary.txt"  || die "summary.txt: regions should be 3/8"
+grep -q '3/6' "$TMP/summary.txt"  || die "summary.txt: lines should be 3/6"
+grep -q '1/4' "$TMP/summary.txt"  || die "summary.txt: branches should be 1/4"
+echo "[PASS] summary.txt reachable-only numbers"
+
+# index.html: file + Totals cells patched to the reachable-only figures.
+grep -q '(1/2)' "$TMP/html/index.html" || die "index.html: function cell should become (1/2)"
+grep -q '(3/6)' "$TMP/html/index.html" || die "index.html: line cell should become (3/6)"
+grep -q '(3/8)' "$TMP/html/index.html" || die "index.html: region cell should become (3/8)"
+grep -q '(1/4)' "$TMP/html/index.html" || die "index.html: branch cell should become (1/4)"
+grep -q '(2/4)' "$TMP/html/index.html" && die "index.html: stale original (2/4) must be overwritten"
+echo "[PASS] index.html cells patched"
 
 # Tally on stdout.
 printf '%s\n' "$TALLY" | grep -q 'unreachable=2' || die "tally should report unreachable=2 (got: $TALLY)"
@@ -213,13 +253,14 @@ EOF
   "$COVTOOL" show "$E/p" -instr-profile="$E/p.profdata" -show-line-counts-or-regions \
     -format=text -output-dir="$E/text" 2>/dev/null
   "$COVTOOL" export "$E/p" -instr-profile="$E/p.profdata" --format=text > "$E/coverage.json"
-  printf "TOTAL\n" > "$E/summary.txt"
+  "$COVTOOL" report "$E/p" -instr-profile="$E/p.profdata" > "$E/summary.txt"
+  "$COVTOOL" report "$E/p" -instr-profile="$E/p.profdata" -show-functions "$E/p.c" > "$E/perfunc.txt" 2>/dev/null
   cat > "$E/reach.json" << EOF
 { "reachable": [ { "mangled": "covered_fn", "file": "p.c", "line": 2 },
                  { "mangled": "reachable_unreached", "file": "p.c", "line": 3 } ],
   "unreachable_defined": [ { "mangled": "dead_fn", "file": "p.c", "line": 4 } ] }
 EOF
-  annotate_reachability "$E/coverage.json" "$E/reach.json" "$E/html" "$E/text" "$E/summary.txt" >/dev/null \
+  annotate_reachability "$E/coverage.json" "$E/reach.json" "$E/html" "$E/text" "$E/summary.txt" "$E/perfunc.txt" >/dev/null \
     || die "e2e: annotate_reachability returned non-zero on real llvm-cov output"
   realhtml="$(find "$E/html/coverage" -name 'p.c.html')"
   realtext="$(find "$E/text/coverage" -name 'p.c.txt')"
@@ -228,6 +269,9 @@ EOF
   grep -Eq '\|U ' "$realtext"       || die "e2e: real text should contain a U marker for dead_fn"
   grep -Eq '\|R ' "$realtext"       || die "e2e: real text should contain an R marker"
   grep -q 'Reachable but NOT reached' "$E/summary.txt" || die "e2e: summary.txt should gain the block"
+  # reachable-only recompute: dead_fn excluded → functions 2/3 (covered_fn+main of 3 kept).
+  grep -qi 'Reachable-only coverage' "$E/summary.txt" || die "e2e: summary.txt should carry reachable-only table"
+  grep -q '(2/3)' "$E/html/index.html" || die "e2e: index.html function coverage should drop to (2/3)"
   echo "[PASS] end-to-end against real llvm-cov"
 else
   echo "[SKIP] clang/llvm-cov not available — skipping real-llvm-cov e2e"

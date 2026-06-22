@@ -187,6 +187,18 @@ a per-line marker column (`U` unreachable, `R` reachable-but-unreached,
 `A` anomaly), and `summary.txt` gains a reachability tally plus the explicit
 list of reachable-but-not-reached functions to go after.
 
+**The coverage numbers themselves are recomputed to exclude unreachable
+functions.** Normally a function coverage of `5/6` counts a statically-dead
+function in the denominator even though the harness can never reach it. With
+`--reachability`, the Function / Line / Region / Branch numbers in both
+`index.html` and `summary.txt` drop every statically-unreachable function from
+the denominators (and numerators), so the percentages reflect only code the
+harness can actually reach — e.g. that `5/6` becomes `5/5`. The numbers come
+straight from `llvm-cov report -show-functions` (so they match llvm-cov's own
+math exactly), re-summed over the reachable set; the unmodified figures remain
+in `coverage.json`. With `--reachability` the HTML index is rendered flat
+(directory grouping disabled) so its cells can be rewritten reliably.
+
 `cov-analysis diff` accepts the same `--reachability` flag; it splits the
 "still uncovered functions" list in the diff report into reachable (amber,
 actionable) and unreachable (grey, expected dead).
