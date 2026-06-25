@@ -2,7 +2,7 @@
 
 Replacing `afl-cov` and `libfuzzer-cov` with modern coverage gathering and great features!
 
-Version: 1.0.0
+Version: 1.0
 
 - [Introduction](#introduction)
 - [Prerequisites](#prerequisites)
@@ -27,13 +27,15 @@ Version: 1.0.0
 
 `cov-analysis` generates **LLVM source-based code coverage** reports from a fuzzing corpus. It auto-detects the on-disk layout used by [AFL++](https://github.com/AFLplusplus/AFLplusplus) (queue/crashes/timeouts directories, single or parallel), libFuzzer and libafl (flat corpus dir plus `crash-*`/`leak-*`/`oom-*` artifacts), and honggfuzz (flat corpus plus `SIG*.fuzz` crash files). It replays each input through a coverage-instrumented binary, merges the raw profiles, and produces HTML, text, and JSON reports via `llvm-profdata` and `llvm-cov`.
 
-This is a rewrite of the original cov-analysis. Key changes in 1.0.0:
+This is a rewrite of the original cov-analysis. Key changes in 1.0:
 - New: diff reports comparing coverage between two runs
 - New: stability analysis identifying source lines with non-deterministic hit counts
 - Replaced gcov/lcov/genhtml with LLVM source-based coverage (`-fprofile-instr-generate`, `llvm-profdata`, `llvm-cov`) - faster, more accurate under optimization
 - `cov-analysis build` sets compiler flags and builds the target; `cov-analysis driver` emits a ready-to-use `coverage_driver.c` for `LLVMFuzzerTestOneInput` harnesses
 - `cov-analysis diff` generates an HTML diff report comparing coverage between two JSON exports
 - Rewritten in bash (was Python)
+
+The coverage reports can be augmented with harness reachability information from [fuzz-reachability](https://github.com/AFLplusplus/fuzz-reachability)
 
 ## Prerequisites
 

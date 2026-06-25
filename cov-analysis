@@ -2,7 +2,7 @@
 #
 #  File: cov-analysis
 #
-#  Version: 1.0.0
+#  Version: 1.0
 #
 #  Purpose: Generate LLVM source-based code coverage reports from AFL++ corpus.
 #           Replays queue/crash/timeout files through a coverage-instrumented
@@ -11,12 +11,12 @@
 #
 #  Copyright (c) 2026 by Marc "vanHauser" Heuse (vh@thc.org)
 #
-#  License: GNU Affero General Public License 3 or any later version)
+#  License: GNU Affero General Public License 3 (or any later version)
 #
 
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.0"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
