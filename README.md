@@ -189,7 +189,7 @@ HTML file view each function's lines are tinted:
 - **dark grey** — statically *unreachable*, so it is expected to stay
   uncovered — ignore it
 - **purple** — covered yet flagged unreachable (a static-analysis anomaly worth
-  a look, since the analyzer claims it never under-reports)
+  a look, since the analyzer should never under-reports, please open an issue to report bugs)
 
 The HTML `index.html` gains a tally banner. The text source view (`text/`) gets
 a per-line marker column (`U` unreachable, `R` reachable-but-unreached,
