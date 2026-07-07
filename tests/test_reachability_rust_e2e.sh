@@ -14,7 +14,6 @@ COV="$(pwd)/cov-analysis"
 FIXTURE="${FUZZ_REACH_FIXTURE:-/prg/fuzz-reachability/fixtures/rust_generic}"
 REACH_CLI="${FUZZ_REACH_CLI:-/prg/fuzz-reachability/driver/.venv/bin/reachability}"
 ANALYZER="${FUZZ_REACH_ANALYZER:-/prg/fuzz-reachability/analyzer/build/reachability-analyzer}"
-REACH_EXTRA_PATH="${FUZZ_REACH_EXTRA_PATH:-/home/marc/go/bin}"
 
 command -v python3 >/dev/null 2>&1 || { echo "[SKIP] python3 not available"; exit 0; }
 [ -d "$FIXTURE" ]   || { echo "[SKIP] fixtures/rust_generic not found (fuzz-reachability checkout missing)"; exit 0; }
@@ -56,7 +55,7 @@ DEAD_LINE=$(grep -n '^pub extern "C" fn dead_fn' "$WORK/src/lib.rs" | head -n1 |
 [ -n "$DEAD_LINE" ] || die "could not locate injected dead_fn line"
 
 # ── stage 1: static reachability analysis of the (unbuilt) staticlib ────────
-if ! REACHABILITY_ANALYZER="$ANALYZER" PATH="$REACH_EXTRA_PATH:$PATH" \
+if ! REACHABILITY_ANALYZER="$ANALYZER" \
   "$REACH_CLI" run --lang rust --project "$WORK" --entry LLVMFuzzerTestOneInput \
   --out "$WORK/reach.json" > "$TMP/reach_run.log" 2>&1; then
   if grep -qiE 'bundled LLVM|bitcode cannot be read|LLVM_MAJOR' "$TMP/reach_run.log"; then

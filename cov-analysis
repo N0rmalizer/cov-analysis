@@ -1337,7 +1337,9 @@ _RUST_DISAMBIG = re.compile(r'17h[0-9a-f]{16}E$')
 def _reach_key(entry):
     if entry.endswith('*'):
         return entry[:-1]
-    return _RUST_DISAMBIG.sub('', entry)
+    if len(entry) > 20:
+        return _RUST_DISAMBIG.sub('', entry)
+    return entry
 
 
 def _reach_int(value):
@@ -1351,7 +1353,7 @@ def _reach_int(value):
 def parse_reachability(path):
     # path: a .json report, a directory (preferring a reachability.json inside
     # it, falling back to reached.txt/not_reached.txt), or a single
-    # allow/ignore .txt list. Returns (reachable, unreachable, indirect, conf,
+    # allow/ignore .txt list. Returns (reachable, unreachable, conf,
     # reach_keys, unreach_keys, loc, loc_base, reachable_qualified,
     # unreachable_qualified) sets of function names; loc maps (full path, line)
     # -> 'reachable'/'unreachable' for json-mode fallback, loc_base is the same
@@ -1361,7 +1363,6 @@ def parse_reachability(path):
     # (JSON mode only; empty for txt/dir-of-txt-lists mode).
     reachable: Set[str] = set()
     unreachable: Set[str] = set()
-    indirect: Set[str] = set()
     conf: Dict[str, str] = {}
     reach_keys: Set[str] = set()
     unreach_keys: Set[str] = set()
@@ -1370,7 +1371,7 @@ def parse_reachability(path):
     reachable_qualified: Set[Tuple[str, str]] = set()
     unreachable_qualified: Set[Tuple[str, str]] = set()
     if not path:
-        return (reachable, unreachable, indirect, conf, reach_keys, unreach_keys,
+        return (reachable, unreachable, conf, reach_keys, unreach_keys,
                 loc, loc_base, reachable_qualified, unreachable_qualified)
 
     def parse_txt(p):
@@ -1418,9 +1419,6 @@ def parse_reachability(path):
             for name in names:
                 reachable.add(name)
                 reach_keys.add(fn.get('key') or _reach_key(name))
-            if fn.get('indirect_only'):
-                for name in names:
-                    indirect.add(name)
             c = fn.get('confidence')
             if c:
                 for name in names:
@@ -1454,7 +1452,7 @@ def parse_reachability(path):
         else:
             reachable = names
             reach_keys = keys
-    return (reachable, unreachable, indirect, conf, reach_keys, unreach_keys,
+    return (reachable, unreachable, conf, reach_keys, unreach_keys,
             loc, loc_base, reachable_qualified, unreachable_qualified)
 
 
@@ -1719,7 +1717,7 @@ def render_code_snippets(filename: str, diff: dict, source_lines: List[str]) -> 
 
 def render_html(diffs: List[dict], baseline_name: str, updated_name: str, output_path: str,
                 reachable: Set[str] = frozenset(), unreachable: Set[str] = frozenset(),
-                indirect: Set[str] = frozenset(), reach_keys: Set[str] = frozenset(),
+                reach_keys: Set[str] = frozenset(),
                 unreach_keys: Set[str] = frozenset(),
                 reachable_qualified: Set[Tuple[str, str]] = frozenset(),
                 unreachable_qualified: Set[Tuple[str, str]] = frozenset()):
@@ -1949,7 +1947,7 @@ def main():
     ap.add_argument('--reachability', default=None, help='fuzz-reachability JSON, its output directory, or a sancov .txt list. Splits still-uncovered functions into reachable vs unreachable.')
     args = ap.parse_args()
 
-    (reachable, unreachable, indirect, _, reach_keys, unreach_keys, _, _,
+    (reachable, unreachable, _, reach_keys, unreach_keys, _, _,
      reachable_qualified, unreachable_qualified) = parse_reachability(args.reachability)
 
     baseline = load_json(args.baseline_json)
@@ -1986,7 +1984,7 @@ def main():
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     render_html(diffs, os.path.basename(args.baseline_json), os.path.basename(args.updated_json), str(out_path),
-                reachable, unreachable, indirect, reach_keys, unreach_keys,
+                reachable, unreachable, reach_keys, unreach_keys,
                 reachable_qualified, unreachable_qualified)
 
 
@@ -2035,7 +2033,7 @@ def load_json(path):
 
 
 # ── parse the reachability input (json | dir | single .txt) ──────────────────
-(reachable, unreachable, indirect, conf, reach_keys, unreach_keys, loc, loc_base,
+(reachable, unreachable, conf, reach_keys, unreach_keys, loc, loc_base,
  reachable_qualified, unreachable_qualified) = parse_reachability(reach_path)
 
 
@@ -2215,12 +2213,6 @@ if os.path.isfile(idx):
             f.write(doc)
 
 # ── annotate the text source view ─────────────────────────────────────────────
-# llvm-cov colorizes its -format=text output with ANSI escapes whenever it
-# detects a TTY on stdout -- even when writing to -output-dir files. The escapes
-# prefix the per-file "<path>:" header (so `probe` no longer matches line_state)
-# and wrap source spans, which would otherwise defeat header detection and leave
-# every line unmarked. Strip them per line so parsing and marking are agnostic
-# to how the text was produced.
 tcovdir = os.path.join(text_dir, 'coverage')
 ansi_re = re.compile(r'\x1b\[[0-9;]*m')
 src_re = re.compile(r'^(\s*\d+\|[^|]*\|)(.*)$')
@@ -2765,10 +2757,6 @@ cmd_report() {
   }
 
   log "Generating text report..."
-  # -use-color=false: llvm-cov otherwise autodetects a TTY on stdout and writes
-  # ANSI escapes into the -output-dir text files, which are noise in a saved
-  # report and break --reachability's text annotation. Force plain, deterministic
-  # output regardless of whether stdout is a terminal.
   "$LLVM_COV" show "${SHOW_OPTS[@]}" \
     -format=text \
     -use-color=false \

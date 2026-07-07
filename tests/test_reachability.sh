@@ -851,15 +851,85 @@ grep -Eq 'reachable functions +: 1' "$TMP/keydiverge_summary.txt" \
   || die "F4: summary should count exactly 1 reachable function (only if the explicit key was read)"
 echo "[PASS] F4: explicit JSON \"key\" is read even when it diverges from _reach_key(mangled)"
 
-# ── F5: ANSI-colored text output must still be annotated ─────────────────────
-# llvm-cov colorizes its -format=text output with ANSI escapes whenever it
-# detects a TTY on stdout -- even when writing to -output-dir files. The escapes
-# prefix the per-file "<path>:" header (so the header no longer matches
-# line_state) and can lead source lines, which before the fix left `cur` unset
-# and every line unmarked. The HTML view uses CSS (not ANSI), so it stayed
-# correctly tinted -- the failure surfaced as reach-grey present in HTML but the
-# text U marker missing, exactly the reported signature. The annotator must
-# strip the escapes so markers land regardless of how the text was produced.
+FILE_L="$TMP/v0exact/lib.rs"
+mkdir -p "$TMP/v0exact"
+V0_EXACT_NAME='_RINvCs7f8e9d0c1b2a_3app10sync_stateE'
+cat > "$TMP/v0exact_reach.json" << EOF
+{ "reachable": [ { "mangled": "$V0_EXACT_NAME", "file": null, "line": null, "indirect_only": false } ],
+  "unreachable_defined": [] }
+EOF
+cat > "$TMP/v0exact_coverage.json" << EOF
+{ "data": [ { "files": [], "functions": [
+    { "name": "$V0_EXACT_NAME", "count": 0, "filenames": ["$FILE_L"], "regions": [[3,1,5,2,0,0,0,0]] } ] } ],
+  "type": "llvm.coverage.json.export", "version": "2.0.0" }
+EOF
+mkdir -p "$TMP/v0exact_html/coverage" "$TMP/v0exact_text/coverage"
+{
+  printf "%s" "<!doctype html><html><head></head><body><div class='centered'><table><div class='source-name-title'><pre>$FILE_L</pre></div>"
+  for ln in $(seq 1 5); do
+    printf "\n<tr><td class='line-number'><a name='L%d' href='#L%d'><pre>%d</pre></a></td><td class='code'><pre>line %d</pre></td></tr>" "$ln" "$ln" "$ln" "$ln"
+  done
+  printf "\n</table></div></body></html>\n"
+} > "$TMP/v0exact_html/coverage/lib.rs.html"
+{
+  printf "Coverage Report\n%s:\n" "$FILE_L"
+  for ln in $(seq 1 5); do printf "%5d|%7d|line %d\n" "$ln" 0 "$ln"; done
+} > "$TMP/v0exact_text/coverage/lib.rs.txt"
+: > "$TMP/v0exact_summary.txt"
+annotate_reachability "$TMP/v0exact_coverage.json" "$TMP/v0exact_reach.json" \
+  "$TMP/v0exact_html" "$TMP/v0exact_text" "$TMP/v0exact_summary.txt" >/dev/null \
+  || die "v0exact: annotate_reachability returned non-zero"
+grep -q "reach-amber'><td class='line-number'><a name='L3'" "$TMP/v0exact_html/coverage/lib.rs.html" \
+  || die "v0exact: identical v0-mangled names on both sides must classify reachable-unreached via the exact name join, with no file/line to fall back on"
+grep -Eq 'reachable functions +: 1' "$TMP/v0exact_summary.txt" \
+  || die "v0exact: summary should count exactly 1 reachable function (only possible via the name join, since the reachability entry carries no file/line)"
+echo "[PASS] v0exact: identical v0-mangled reachability/coverage names join by exact NAME, not the (file,line) fallback"
+
+FILE_M="$TMP/v0fallback/lib.rs"
+mkdir -p "$TMP/v0fallback"
+V0_MISMATCH_NAME='_RINvCs2b3c4d5e6f7a_3app8finalizeE'
+LEGACY_MISMATCH_NAME='_ZN3app8finalize17h5555555555555555E'
+python3 -c "
+import re
+d = re.compile(r'17h[0-9a-f]{16}E\$')
+assert d.sub('', '$V0_MISMATCH_NAME') == '$V0_MISMATCH_NAME'
+assert '$V0_MISMATCH_NAME' != '$LEGACY_MISMATCH_NAME'
+assert d.sub('', '$LEGACY_MISMATCH_NAME') != '$V0_MISMATCH_NAME'
+" || die "v0fallback test setup: legacy and v0 names must be genuinely non-matching by name or _reach_key"
+cat > "$TMP/v0fallback_reach.json" << EOF
+{ "reachable": [ { "mangled": "$LEGACY_MISMATCH_NAME", "file": "$FILE_M", "line": 7 } ],
+  "unreachable_defined": [] }
+EOF
+cat > "$TMP/v0fallback_coverage.json" << EOF
+{ "data": [ { "files": [], "functions": [
+    { "name": "$V0_MISMATCH_NAME", "count": 0, "filenames": ["$FILE_M"], "regions": [[7,1,9,2,0,0,0,0]] } ] } ],
+  "type": "llvm.coverage.json.export", "version": "2.0.0" }
+EOF
+mkdir -p "$TMP/v0fallback_html/coverage" "$TMP/v0fallback_text/coverage"
+{
+  printf "%s" "<!doctype html><html><head></head><body><div class='centered'><table><div class='source-name-title'><pre>$FILE_M</pre></div>"
+  for ln in $(seq 1 9); do
+    printf "\n<tr><td class='line-number'><a name='L%d' href='#L%d'><pre>%d</pre></a></td><td class='code'><pre>line %d</pre></td></tr>" "$ln" "$ln" "$ln" "$ln"
+  done
+  printf "\n</table></div></body></html>\n"
+} > "$TMP/v0fallback_html/coverage/lib.rs.html"
+{
+  printf "Coverage Report\n%s:\n" "$FILE_M"
+  for ln in $(seq 1 9); do printf "%5d|%7d|line %d\n" "$ln" 0 "$ln"; done
+} > "$TMP/v0fallback_text/coverage/lib.rs.txt"
+: > "$TMP/v0fallback_summary.txt"
+annotate_reachability "$TMP/v0fallback_coverage.json" "$TMP/v0fallback_reach.json" \
+  "$TMP/v0fallback_html" "$TMP/v0fallback_text" "$TMP/v0fallback_summary.txt" >/dev/null \
+  || die "v0fallback: annotate_reachability returned non-zero"
+grep -q "reach-amber'><td class='line-number'><a name='L7'" "$TMP/v0fallback_html/coverage/lib.rs.html" \
+  || die "v0fallback: legacy-mangled reachability entry vs v0-mangled coverage name (same file/line) must still classify reachable-unreached via the (file,line) fallback"
+grep -Eq 'reachable functions +: 1' "$TMP/v0fallback_summary.txt" \
+  || die "v0fallback: summary should count exactly 1 reachable function via the fallback"
+echo "[PASS] v0fallback: legacy-vs-v0 name mismatch with matching (file,line) still classifies via the fallback"
+
+# ── F5: ANSI-colored text output (llvm-cov emits ANSI escapes under a TTY,
+# even into -output-dir files) must still be annotated with correct U/R
+# markers once the annotator strips them ─────────────────────────────────────
 FILE_ANSI="$TMP/ansi/lib.c"
 mkdir -p "$TMP/ansi"
 cat > "$TMP/ansi_reach.json" << EOF
@@ -873,7 +943,6 @@ cat > "$TMP/ansi_coverage.json" << EOF
   "type": "llvm.coverage.json.export", "version": "2.0.0" }
 EOF
 mkdir -p "$TMP/ansi_html/coverage" "$TMP/ansi_text/coverage"
-# HTML view carries no ANSI (llvm-cov HTML uses CSS): it must stay tinted.
 {
   printf "%s" "<!doctype html><html><head></head><body><div class='centered'><table><div class='source-name-title'><pre>$FILE_ANSI</pre></div>"
   for ln in $(seq 1 7); do
@@ -881,9 +950,6 @@ mkdir -p "$TMP/ansi_html/coverage" "$TMP/ansi_text/coverage"
   done
   printf "\n</table></div></body></html>\n"
 } > "$TMP/ansi_html/coverage/lib.c.html"
-# Text view WITH ANSI escapes as llvm-cov emits under a TTY: a reset+color on
-# the header, a leading reset on the first source line, and a highlight span on
-# a later one -- the three shapes seen in real colorized output.
 ESC=$'\033'
 {
   printf "%sCoverage Report%s\n" "${ESC}[0;36m" "${ESC}[0m"
@@ -909,6 +975,14 @@ grep -q "$ESC" "$TMP/ansi_text/coverage/lib.c.txt" \
 grep -q "reach-grey'><td class='line-number'><a name='L5'" "$TMP/ansi_html/coverage/lib.c.html" \
   || die "ansi: HTML view (no ANSI) must still tint the unreachable line reach-grey"
 echo "[PASS] F5: ANSI-colored llvm-cov text output is stripped and still gets U/R markers"
+
+# ── M1: a bare 20-char legacy disambiguator (no stem) must be left unchanged,
+# mirroring the C++ legacyStem size()>20 guard ───────────────────────────────
+{ reach_py_lib; cat << 'PYEOF'
+assert _reach_key('17h0123456789abcdefE') == '17h0123456789abcdefE'
+PYEOF
+} | python3 - || die "M1: _reach_key must leave a bare 17h<16hex>E string unchanged"
+echo "[PASS] M1: _reach_key guards len(entry)>20 like C++ legacyStem"
 
 # ── clang-gated end-to-end against REAL llvm-cov output ──────────────────────
 CLANG="$(detect_clang || true)"
