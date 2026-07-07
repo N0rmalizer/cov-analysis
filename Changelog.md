@@ -1,4 +1,5 @@
 # v1.1-dev
+- reachability: per-line HTML/text tinting now attributes each source line to the function whose smallest own-file code region contains it (llvm-cov's innermost-segment model) instead of painting the min..max region envelope; an inlined-macro expansion region (mapped to the macro's `#define` line) no longer stretches a function's span across the file and mistints unrelated lines, so dead functions tint grey even in dense C++ harnesses. Recomputed tally/summary numbers are unaffected (they already come from `llvm-cov report -show-functions`).
 - reachability: `report` and `diff` now share one Python library (`reach_py_lib`) so both classify functions identically
 - reachability: match Rust legacy-mangling disambiguators (`17h<hash>E`) and fall back to a (file, line) join for v0-mangled names
 - reachability: file-qualify `static` function matches so same-named statics in different files no longer collide

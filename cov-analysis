@@ -2056,6 +2056,8 @@ for obj in cov.get('data', []) or []:
         ends = [int(r[2]) for r in regions if len(r) >= 4]
         if not starts:
             continue
+        own_code = [(int(r[0]), int(r[2])) for r in regions
+                    if len(r) >= 4 and (len(r) < 8 or (int(r[7]) == 0 and int(r[5]) == 0))]
         funcs.append({
             'name': name,
             'norm': norm(name),
@@ -2063,6 +2065,7 @@ for obj in cov.get('data', []) or []:
             'file': filenames[0],
             'start': min(starts),
             'end': max(ends),
+            'code_lines': own_code or [(min(starts), max(ends))],
         })
 
 for fn in funcs:
@@ -2105,20 +2108,27 @@ t_unreached = sum(1 for f in funcs if f['state'] in UNREACHED_STATES)
 t_anomaly = sum(1 for f in funcs if f['state'] == 'anomaly')
 actionable = sorted({f['name'] for f in funcs if f['state'] in UNREACHED_STATES})
 
-# ── per-file line -> state map ────────────────────────────────────────────────
-PRIORITY = ['unknown', 'covered', 'unreachable', 'reachable-unreached-low',
-            'reachable-unreached', 'reachable-unreached-indirect', 'anomaly']
-
-
-def better(a, b):
-    return a if PRIORITY.index(a) >= PRIORITY.index(b) else b
-
-
+# ── per-file line -> state map: own each line by the function whose SMALLEST
+# code region contains it (llvm-cov's innermost-segment model), painting only a
+# function's own-file code regions. NOT the min..max envelope over all regions:
+# an inlined-macro expansion region is mapped to the macro's #define line, which
+# would stretch a function's span across the whole file and mistint unrelated
+# lines (e.g. a dead function shown amber because a live function's envelope
+# overlapped it). Ties go to a covered (executed) owner so real coverage is not
+# overpainted. ─────────────────────────────────────────────────────────────────
 line_state = {}
+_owner = {}
 for fn in funcs:
-    d = line_state.setdefault(fn['file'], {})
-    for ln in range(fn['start'], fn['end'] + 1):
-        d[ln] = better(d.get(ln, 'unknown'), fn['state'])
+    d = _owner.setdefault(fn['file'], {})
+    rank = 1 if fn['state'] == 'covered' else 0
+    for l0, l1 in fn['code_lines']:
+        span = l1 - l0
+        for ln in range(l0, l1 + 1):
+            cur = d.get(ln)
+            if cur is None or span < cur[0] or (span == cur[0] and rank > cur[1]):
+                d[ln] = (span, rank, fn['state'])
+for _f, _d in _owner.items():
+    line_state[_f] = {ln: v[2] for ln, v in _d.items()}
 
 
 def states_for(srcfile):

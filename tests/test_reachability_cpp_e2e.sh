@@ -173,20 +173,24 @@ sed -n '/Reachable but NOT reached/,$p' "$WORK/covout/summary.txt" | grep -q 'fn
   || die "actionable list should include the unreached-but-reachable fnptr_times_two"
 echo "[PASS] stage 5: actionable (reachable-but-unreached) list names the uncovered mechanism functions"
 
-# ── stage 6: HTML banner + in-place annotation ──────────────────────────────
-# Presence-only (unlike ziggy's per-line check): at -O0 the REACHED macro and the
-# harness lambdas give llvm-cov functions wide, overlapping [start,end] line spans,
-# and the amber>grey line-merge priority means a dead function's line can render
-# amber -- so per-line grey tinting is not reliable for this fixture. Function-level
-# classification (stage 5) is the authoritative check here.
+# ── stage 6: HTML banner + per-line annotation (grey/amber/covered) ─────────
 IDX="$WORK/covout/html/index.html"
 grep -q 'reach-banner' "$IDX"                        || die "index.html should gain a reachability banner"
 grep -q "$T_UNREACH unreachable" "$IDX"              || die "index.html banner should report $T_UNREACH unreachable functions"
 grep -q "$T_ANOM covered-yet-unreachable" "$IDX"     || die "index.html banner should report $T_ANOM covered-yet-unreachable functions"
 HFILE="$(find "$WORK/covout/html/coverage" -name 'main.cpp.html' | head -1)"
 [ -n "$HFILE" ] || die "no main.cpp.html found under covout/html/coverage"
-grep -q "class='reach-amber'" "$HFILE"   || die "main.cpp.html should tint reachable-but-unreached lines amber"
-grep -q "class='reach-anomaly'" "$HFILE" || die "main.cpp.html should tint covered-yet-unreachable lines (static-init/ifunc)"
-echo "[PASS] stage 6: index.html banner + in-place HTML annotation applied"
+DEAD_LINE=$(grep -n 'unreachable_leaf(void)'     "$WORK/main.cpp" | head -1 | cut -d: -f1)
+AMBER_LINE=$(grep -n 'plt_external_call(const char' "$WORK/main.cpp" | head -1 | cut -d: -f1)
+COV_LINE=$(grep -n 'int fnptr_add_one(int'       "$WORK/main.cpp" | head -1 | cut -d: -f1)
+[ -n "$DEAD_LINE" ] && [ -n "$AMBER_LINE" ] && [ -n "$COV_LINE" ] || die "could not locate fixture source lines"
+grep -q "reach-grey'><td class='line-number'><a name='L$DEAD_LINE'" "$HFILE" \
+  || die "main.cpp.html: unreachable_leaf (line $DEAD_LINE) should tint reach-grey"
+grep -qE "class='reach-amber[a-z-]*'><td class='line-number'><a name='L$AMBER_LINE'" "$HFILE" \
+  || die "main.cpp.html: plt_external_call (line $AMBER_LINE) should tint amber (reachable-unreached)"
+if grep -q "class='reach-[a-z-]*'><td class='line-number'><a name='L$COV_LINE'" "$HFILE"; then
+  die "main.cpp.html: covered fnptr_add_one (line $COV_LINE) must NOT carry any reach-* tint"
+fi
+echo "[PASS] stage 6: per-line tint correct (unreachable_leaf grey, plt_external_call amber, covered fnptr_add_one untinted)"
 
 echo "[PASS] test_reachability_cpp_e2e"
