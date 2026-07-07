@@ -2,7 +2,7 @@
 #
 #  File: cov-analysis
 #
-#  Version: 1.0
+#  Version: 1.1-dev
 #
 #  Purpose: Generate LLVM source-based code coverage reports from AFL++ corpus.
 #           Replays queue/crash/timeout files through a coverage-instrumented
@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-VERSION="1.0"
+VERSION="1.1-dev"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -412,8 +412,9 @@ Optional:
                      (default: /usr/include/)
   --reachability <p> Cross-reference fuzz-reachability output and annotate the
                      HTML and text reports in place. <p> is its JSON report, its
-                     output directory (reached.txt/not_reached.txt), or a single
-                     sancov allow/ignore .txt list. In the HTML file view each
+                     output directory (reachability.json when present, else
+                     reached.txt/not_reached.txt), or a single sancov
+                     allow/ignore .txt list. In the HTML file view each
                      function is tinted: dark grey = statically unreachable
                      (expected dead), amber = reachable but not reached (the
                      actionable gap), purple = covered yet flagged unreachable;
@@ -524,9 +525,11 @@ Options:
   -o <dir>           Report directory for default-path lookups and HTML output
                      (default: .). The HTML is written to <dir>/coverage_diff.html.
   --reachability <p> Cross-reference fuzz-reachability output (its JSON report,
-                     its output directory, or a sancov allow/ignore .txt list).
-                     Splits the "still uncovered functions" list into reachable
-                     (amber, actionable) and unreachable (grey, expected dead).
+                     its output directory — reachability.json when present,
+                     else reached.txt/not_reached.txt — or a sancov
+                     allow/ignore .txt list). Splits the "still uncovered
+                     functions" list into reachable (amber, actionable) and
+                     unreachable (grey, expected dead).
   -h, --help         Print this help and exit
 EOF
 }
@@ -1321,6 +1324,165 @@ cmd_search() {
   exit 0
 }
 
+reach_py_lib() {
+  cat <<'REACHPY'
+import os
+import re
+import sys
+from typing import Dict, Set, Tuple
+
+_RUST_DISAMBIG = re.compile(r'17h[0-9a-f]{16}E$')
+
+
+def _reach_key(entry):
+    if entry.endswith('*'):
+        return entry[:-1]
+    return _RUST_DISAMBIG.sub('', entry)
+
+
+def _reach_int(value):
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def parse_reachability(path):
+    # path: a .json report, a directory (preferring a reachability.json inside
+    # it, falling back to reached.txt/not_reached.txt), or a single
+    # allow/ignore .txt list. Returns (reachable, unreachable, indirect, conf,
+    # reach_keys, unreach_keys, loc, loc_base, reachable_qualified,
+    # unreachable_qualified) sets of function names; loc maps (full path, line)
+    # -> 'reachable'/'unreachable' for json-mode fallback, loc_base is the same
+    # keyed on basename(path) as a secondary fallback. reachable_qualified /
+    # unreachable_qualified map (basename(file), mangled) -> present. conf maps
+    # name -> the analyzer's 'high'/'medium'/'low' reachability confidence
+    # (JSON mode only; empty for txt/dir-of-txt-lists mode).
+    reachable: Set[str] = set()
+    unreachable: Set[str] = set()
+    indirect: Set[str] = set()
+    conf: Dict[str, str] = {}
+    reach_keys: Set[str] = set()
+    unreach_keys: Set[str] = set()
+    loc: Dict[Tuple[str, int], str] = {}
+    loc_base: Dict[Tuple[str, int], str] = {}
+    reachable_qualified: Set[Tuple[str, str]] = set()
+    unreachable_qualified: Set[Tuple[str, str]] = set()
+    if not path:
+        return (reachable, unreachable, indirect, conf, reach_keys, unreach_keys,
+                loc, loc_base, reachable_qualified, unreachable_qualified)
+
+    def parse_txt(p):
+        names: Set[str] = set()
+        keys: Set[str] = set()
+        kind = None
+        with open(p, 'r', encoding='utf-8', errors='replace') as fh:
+            for line in fh:
+                s = line.strip()
+                if not s:
+                    continue
+                if s.startswith('#'):
+                    low = s.lower()
+                    if 'allowlist' in low:
+                        kind = 'allow'
+                    elif 'ignorelist' in low:
+                        kind = 'ignore'
+                    continue
+                if s.startswith('fun:'):
+                    names.add(s[4:].strip())
+                    keys.add(_reach_key(s[4:].strip()))
+        return kind, names, keys
+
+    if os.path.isdir(path):
+        jpath = os.path.join(path, 'reachability.json')
+        if os.path.isfile(jpath):
+            print('using reachability.json (richer than the txt lists)', file=sys.stderr)
+            return parse_reachability(jpath)
+        rp = os.path.join(path, 'reached.txt')
+        npath = os.path.join(path, 'not_reached.txt')
+        if os.path.isfile(rp):
+            _, reachable, reach_keys = parse_txt(rp)
+        if os.path.isfile(npath):
+            _, unreachable, unreach_keys = parse_txt(npath)
+    elif path.endswith('.json'):
+        import json
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        for fn in data.get('reachable', []) or []:
+            mangled = fn.get('mangled')
+            demangled = fn.get('demangled')
+            names = [n for n in (mangled, demangled) if n]
+            if not names:
+                continue
+            for name in names:
+                reachable.add(name)
+                reach_keys.add(fn.get('key') or _reach_key(name))
+            if fn.get('indirect_only'):
+                for name in names:
+                    indirect.add(name)
+            c = fn.get('confidence')
+            if c:
+                for name in names:
+                    conf[name] = c
+            _ln = _reach_int(fn.get('line'))
+            if fn.get('file') and _ln is not None:
+                loc[(fn['file'], _ln)] = 'reachable'
+                loc_base[(os.path.basename(fn['file']), _ln)] = 'reachable'
+            if fn.get('file') and mangled:
+                reachable_qualified.add((os.path.basename(fn['file']), mangled))
+        for fn in data.get('unreachable_defined', []) or []:
+            mangled = fn.get('mangled')
+            demangled = fn.get('demangled')
+            names = [n for n in (mangled, demangled) if n]
+            if not names:
+                continue
+            for name in names:
+                unreachable.add(name)
+                unreach_keys.add(fn.get('key') or _reach_key(name))
+            _ln = _reach_int(fn.get('line'))
+            if fn.get('file') and _ln is not None:
+                loc[(fn['file'], _ln)] = 'unreachable'
+                loc_base[(os.path.basename(fn['file']), _ln)] = 'unreachable'
+            if fn.get('file') and mangled:
+                unreachable_qualified.add((os.path.basename(fn['file']), mangled))
+    else:
+        kind, names, keys = parse_txt(path)
+        if kind == 'ignore':
+            unreachable = names
+            unreach_keys = keys
+        else:
+            reachable = names
+            reach_keys = keys
+    return (reachable, unreachable, indirect, conf, reach_keys, unreach_keys,
+            loc, loc_base, reachable_qualified, unreachable_qualified)
+
+
+def reach_state(name: str, reachable: Set[str], unreachable: Set[str],
+                 reach_keys: Set[str], unreach_keys: Set[str],
+                 reachable_qualified: Set[Tuple[str, str]] = frozenset(),
+                 unreachable_qualified: Set[Tuple[str, str]] = frozenset()):
+    # llvm-cov records local-linkage functions as "<src>:<symbol>".
+    n = name.rsplit(':', 1)[-1]
+    if ':' in name:
+        qk = (os.path.basename(name.rsplit(':', 1)[0]), n)
+        if qk in reachable_qualified:
+            return 'reachable'
+        if qk in unreachable_qualified:
+            return 'unreachable'
+    if name in reachable or n in reachable:
+        return 'reachable'
+    if name in unreachable or n in unreachable:
+        return 'unreachable'
+    k = _reach_key(n)
+    if k in reach_keys:
+        return 'reachable'
+    if k in unreach_keys:
+        return 'unreachable'
+    return None
+REACHPY
+}
+
 # ── command: diff ────────────────────────────────────────────────────────────
 
 cmd_diff() {
@@ -1358,7 +1520,7 @@ cmd_diff() {
   local -a PYARGS=(-o "$REPORT_DIR/coverage_diff.html" --only-changed)
   test -n "$REACHABILITY" && PYARGS+=(--reachability "$REACHABILITY")
   PYARGS+=("$OLD" "$NEW")
-  python3 - "${PYARGS[@]}" << 'PYEOF'
+  { reach_py_lib; cat << 'PYEOF'
 #
 # (c) 2026 Marc "vanHauser" Heuse
 #
@@ -1369,6 +1531,7 @@ import argparse
 import html
 import json
 import os
+import re
 from pathlib import Path
 from typing import Dict, List, Tuple, Set
 
@@ -1376,73 +1539,6 @@ from typing import Dict, List, Tuple, Set
 def load_json(path: str):
     with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
-
-
-def parse_reachability(path):
-    # path: a .json report, a directory holding reached.txt/not_reached.txt, or
-    # a single allow/ignore .txt list. Returns (reachable, unreachable, indirect)
-    # sets of function names.
-    reachable: Set[str] = set()
-    unreachable: Set[str] = set()
-    indirect: Set[str] = set()
-    if not path:
-        return reachable, unreachable, indirect
-
-    def parse_txt(p):
-        names: Set[str] = set()
-        kind = None
-        with open(p, 'r', encoding='utf-8', errors='replace') as fh:
-            for line in fh:
-                s = line.strip()
-                if not s:
-                    continue
-                if s.startswith('#'):
-                    low = s.lower()
-                    if 'allowlist' in low:
-                        kind = 'allow'
-                    elif 'ignorelist' in low:
-                        kind = 'ignore'
-                    continue
-                if s.startswith('fun:'):
-                    names.add(s[4:].strip())
-        return kind, names
-
-    if os.path.isdir(path):
-        rp = os.path.join(path, 'reached.txt')
-        npath = os.path.join(path, 'not_reached.txt')
-        if os.path.isfile(rp):
-            _, reachable = parse_txt(rp)
-        if os.path.isfile(npath):
-            _, unreachable = parse_txt(npath)
-    elif path.endswith('.json'):
-        data = load_json(path)
-        for fn in data.get('reachable', []) or []:
-            name = fn.get('mangled') or fn.get('demangled')
-            if name:
-                reachable.add(name)
-                if fn.get('indirect_only'):
-                    indirect.add(name)
-        for fn in data.get('unreachable_defined', []) or []:
-            name = fn.get('mangled') or fn.get('demangled')
-            if name:
-                unreachable.add(name)
-    else:
-        kind, names = parse_txt(path)
-        if kind == 'ignore':
-            unreachable = names
-        else:
-            reachable = names
-    return reachable, unreachable, indirect
-
-
-def reach_state(name: str, reachable: Set[str], unreachable: Set[str]):
-    # llvm-cov records local-linkage functions as "<src>:<symbol>".
-    n = name.rsplit(':', 1)[-1]
-    if name in reachable or n in reachable:
-        return 'reachable'
-    if name in unreachable or n in unreachable:
-        return 'unreachable'
-    return None
 
 
 def merge_line_state(current: int, new: int) -> int:
@@ -1623,7 +1719,10 @@ def render_code_snippets(filename: str, diff: dict, source_lines: List[str]) -> 
 
 def render_html(diffs: List[dict], baseline_name: str, updated_name: str, output_path: str,
                 reachable: Set[str] = frozenset(), unreachable: Set[str] = frozenset(),
-                indirect: Set[str] = frozenset()):
+                indirect: Set[str] = frozenset(), reach_keys: Set[str] = frozenset(),
+                unreach_keys: Set[str] = frozenset(),
+                reachable_qualified: Set[Tuple[str, str]] = frozenset(),
+                unreachable_qualified: Set[Tuple[str, str]] = frozenset()):
     has_reach = bool(reachable or unreachable)
     total_new = sum(len(d['newly_covered']) for d in diffs)
     total_lost = sum(len(d['no_longer_covered']) for d in diffs)
@@ -1678,9 +1777,9 @@ def render_html(diffs: List[dict], baseline_name: str, updated_name: str, output
         # weight (grey). Without reachability data, keep the single amber list.
         still = d['still_uncovered_fns']
         if has_reach:
-            reach_uncov = [n for n in still if reach_state(n, reachable, unreachable) == 'reachable']
-            dead_uncov = [n for n in still if reach_state(n, reachable, unreachable) == 'unreachable']
-            other_uncov = [n for n in still if reach_state(n, reachable, unreachable) is None]
+            reach_uncov = [n for n in still if reach_state(n, reachable, unreachable, reach_keys, unreach_keys, reachable_qualified, unreachable_qualified) == 'reachable']
+            dead_uncov = [n for n in still if reach_state(n, reachable, unreachable, reach_keys, unreach_keys, reachable_qualified, unreachable_qualified) == 'unreachable']
+            other_uncov = [n for n in still if reach_state(n, reachable, unreachable, reach_keys, unreach_keys, reachable_qualified, unreachable_qualified) is None]
             still_html = (
                 render_fn_list('Still uncovered — reachable (actionable)', reach_uncov, 'chip-amber')
                 + render_fn_list('Still uncovered — unreachable (expected dead)', dead_uncov, 'chip-grey')
@@ -1850,7 +1949,8 @@ def main():
     ap.add_argument('--reachability', default=None, help='fuzz-reachability JSON, its output directory, or a sancov .txt list. Splits still-uncovered functions into reachable vs unreachable.')
     args = ap.parse_args()
 
-    reachable, unreachable, indirect = parse_reachability(args.reachability)
+    (reachable, unreachable, indirect, _, reach_keys, unreach_keys, _, _,
+     reachable_qualified, unreachable_qualified) = parse_reachability(args.reachability)
 
     baseline = load_json(args.baseline_json)
     updated = load_json(args.updated_json)
@@ -1886,12 +1986,14 @@ def main():
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     render_html(diffs, os.path.basename(args.baseline_json), os.path.basename(args.updated_json), str(out_path),
-                reachable, unreachable, indirect)
+                reachable, unreachable, indirect, reach_keys, unreach_keys,
+                reachable_qualified, unreachable_qualified)
 
 
 if __name__ == '__main__':
     main()
 PYEOF
+  } | python3 - "${PYARGS[@]}"
   log "Coverage difference report written to $REPORT_DIR/coverage_diff.html"
   exit 0
 }
@@ -1905,11 +2007,12 @@ PYEOF
 # purple = covered-yet-unreachable), add a per-line U/R/A marker column to the
 # text source view, and append a tally + actionable list to summary.txt. Prints
 # a one-line tally to stdout. <reachability-path> is a .json report, a directory
-# holding reached.txt / not_reached.txt, or a single allow/ignore .txt list.
-# Self-contained inline Python, like cmd_diff.
+# (preferring reachability.json inside it, else reached.txt / not_reached.txt),
+# or a single allow/ignore .txt list.
+# Shares reach_py_lib's parse_reachability/reach_state with cmd_diff.
 annotate_reachability() {
   local COVJSON="$1" REACH="$2" HTML_DIR="$3" TEXT_DIR="$4" SUMMARY="$5" PERFUNC="${6:-}"
-  python3 - "$COVJSON" "$REACH" "$HTML_DIR" "$TEXT_DIR" "$SUMMARY" "$PERFUNC" << 'PYEOF'
+  { reach_py_lib; cat << 'PYEOF'
 #
 # (c) 2026 Marc "vanHauser" Heuse
 #
@@ -1932,60 +2035,8 @@ def load_json(path):
 
 
 # ── parse the reachability input (json | dir | single .txt) ──────────────────
-def parse_txt_list(path):
-    names = set()
-    kind = None
-    with open(path, 'r', encoding='utf-8', errors='replace') as f:
-        for line in f:
-            s = line.strip()
-            if not s:
-                continue
-            if s.startswith('#'):
-                low = s.lower()
-                if 'allowlist' in low:
-                    kind = 'allow'
-                elif 'ignorelist' in low:
-                    kind = 'ignore'
-                continue
-            if s.startswith('fun:'):
-                names.add(s[4:].strip())
-    return kind, names
-
-
-reachable, unreachable, indirect = set(), set(), set()
-loc = {}  # (basename, line) -> 'reachable' | 'unreachable'  (json mode fallback)
-
-if os.path.isdir(reach_path):
-    rp = os.path.join(reach_path, 'reached.txt')
-    npath = os.path.join(reach_path, 'not_reached.txt')
-    if os.path.isfile(rp):
-        _, reachable = parse_txt_list(rp)
-    if os.path.isfile(npath):
-        _, unreachable = parse_txt_list(npath)
-elif reach_path.endswith('.json'):
-    data = load_json(reach_path)
-    for fn in data.get('reachable', []) or []:
-        name = fn.get('mangled') or fn.get('demangled')
-        if not name:
-            continue
-        reachable.add(name)
-        if fn.get('indirect_only'):
-            indirect.add(name)
-        if fn.get('file') and fn.get('line'):
-            loc[(os.path.basename(fn['file']), int(fn['line']))] = 'reachable'
-    for fn in data.get('unreachable_defined', []) or []:
-        name = fn.get('mangled') or fn.get('demangled')
-        if not name:
-            continue
-        unreachable.add(name)
-        if fn.get('file') and fn.get('line'):
-            loc[(os.path.basename(fn['file']), int(fn['line']))] = 'unreachable'
-else:
-    kind, names = parse_txt_list(reach_path)
-    if kind == 'ignore':
-        unreachable = names
-    else:
-        reachable = names
+(reachable, unreachable, indirect, conf, reach_keys, unreach_keys, loc, loc_base,
+ reachable_qualified, unreachable_qualified) = parse_reachability(reach_path)
 
 
 # ── parse coverage functions and classify ────────────────────────────────────
@@ -2018,10 +2069,14 @@ for obj in cov.get('data', []) or []:
 
 for fn in funcs:
     name, n = fn['name'], fn['norm']
-    is_reach = name in reachable or n in reachable
-    is_unreach = name in unreachable or n in unreachable
+    rs = reach_state(name, reachable, unreachable, reach_keys, unreach_keys,
+                      reachable_qualified, unreachable_qualified)
+    is_reach = rs == 'reachable'
+    is_unreach = rs == 'unreachable'
     if not is_reach and not is_unreach:
-        st = loc.get((os.path.basename(fn['file']), fn['start']))
+        st = loc.get((fn['file'], fn['start']))
+        if st is None:
+            st = loc_base.get((os.path.basename(fn['file']), fn['start']))
         if st == 'reachable':
             is_reach = True
         elif st == 'unreachable':
@@ -2033,7 +2088,13 @@ for fn in funcs:
     elif covered:
         fn['state'] = 'covered'
     elif is_reach:
-        fn['state'] = 'reachable-unreached-indirect' if (name in indirect or n in indirect) else 'reachable-unreached'
+        c = conf.get(name) or conf.get(n)
+        if c == 'low':
+            fn['state'] = 'reachable-unreached-low'
+        elif c == 'medium':
+            fn['state'] = 'reachable-unreached-indirect'
+        else:
+            fn['state'] = 'reachable-unreached'
     elif is_unreach:
         fn['state'] = 'unreachable'
     else:
@@ -2041,12 +2102,13 @@ for fn in funcs:
 
 t_reachable = sum(1 for f in funcs if f['member'] == 'reachable')
 t_unreachable = sum(1 for f in funcs if f['member'] == 'unreachable')
-t_unreached = sum(1 for f in funcs if f['state'] in ('reachable-unreached', 'reachable-unreached-indirect'))
+UNREACHED_STATES = ('reachable-unreached', 'reachable-unreached-indirect', 'reachable-unreached-low')
+t_unreached = sum(1 for f in funcs if f['state'] in UNREACHED_STATES)
 t_anomaly = sum(1 for f in funcs if f['state'] == 'anomaly')
-actionable = sorted({f['name'] for f in funcs if f['state'] in ('reachable-unreached', 'reachable-unreached-indirect')})
+actionable = sorted({f['name'] for f in funcs if f['state'] in UNREACHED_STATES})
 
 # ── per-file line -> state map ────────────────────────────────────────────────
-PRIORITY = ['unknown', 'covered', 'unreachable',
+PRIORITY = ['unknown', 'covered', 'unreachable', 'reachable-unreached-low',
             'reachable-unreached', 'reachable-unreached-indirect', 'anomaly']
 
 
@@ -2068,6 +2130,7 @@ def states_for(srcfile):
 HTML_CLASS = {
     'reachable-unreached': 'reach-amber',
     'reachable-unreached-indirect': 'reach-amber-indirect',
+    'reachable-unreached-low': 'reach-amber-low',
     'unreachable': 'reach-grey',
     'anomaly': 'reach-anomaly',
 }
@@ -2075,6 +2138,7 @@ TEXT_MARK = {
     'unreachable': 'U',
     'reachable-unreached': 'R',
     'reachable-unreached-indirect': 'R',
+    'reachable-unreached-low': 'R',
     'anomaly': 'A',
 }
 
@@ -2118,6 +2182,7 @@ tr.reach-grey td { background-color: #d0d0d0 !important; color: #777 !important;
 tr.reach-grey .red { background-color: #d0d0d0 !important; color: #777 !important; }
 tr.reach-amber td.code { background-color: #fff3d6 !important; }
 tr.reach-amber-indirect td.code { background-color: #fff8e8 !important; }
+tr.reach-amber-low td.code { background-color: #fffdf5 !important; }
 tr.reach-anomaly td.code { background-color: #f3e8fd !important; }
 """ % css_marker
 if os.path.isfile(css_path):
@@ -2150,7 +2215,14 @@ if os.path.isfile(idx):
             f.write(doc)
 
 # ── annotate the text source view ─────────────────────────────────────────────
+# llvm-cov colorizes its -format=text output with ANSI escapes whenever it
+# detects a TTY on stdout -- even when writing to -output-dir files. The escapes
+# prefix the per-file "<path>:" header (so `probe` no longer matches line_state)
+# and wrap source spans, which would otherwise defeat header detection and leave
+# every line unmarked. Strip them per line so parsing and marking are agnostic
+# to how the text was produced.
 tcovdir = os.path.join(text_dir, 'coverage')
+ansi_re = re.compile(r'\x1b\[[0-9;]*m')
 src_re = re.compile(r'^(\s*\d+\|[^|]*\|)(.*)$')
 legend = '# reachability:  U=unreachable (dead)   R=reachable, not reached   A=covered yet unreachable'
 if os.path.isdir(tcovdir):
@@ -2164,6 +2236,7 @@ if os.path.isdir(tcovdir):
             out = []
             cur = None
             for line in lines:
+                line = ansi_re.sub('', line)
                 m = src_re.match(line)
                 if m and cur is not None:
                     ln = int(line.split('|', 1)[0].strip())
@@ -2173,10 +2246,14 @@ if os.path.isdir(tcovdir):
                 stripped = line.rstrip()
                 head = stripped.lstrip()
                 if stripped.endswith(':') and not (head[:1].isdigit()):
-                    cur = states_for(stripped[:-1].strip())
-                    out.append(line)
-                    if cur:
-                        out.append(legend)
+                    probe = stripped[:-1].strip()
+                    if probe in line_state or os.path.basename(probe) in line_state:
+                        cur = states_for(probe)
+                        out.append(line)
+                        if cur:
+                            out.append(legend)
+                    else:
+                        out.append(line)
                     continue
                 out.append(line)
             with open(path, 'w', encoding='utf-8') as f:
@@ -2193,7 +2270,55 @@ def reach_member(name):
         return 'unreachable'
     if name in reachable or n in reachable:
         return 'reachable'
+    k = _reach_key(n)
+    if k in reach_keys:
+        return 'reachable'
+    if k in unreach_keys:
+        return 'unreachable'
     return 'none'
+
+
+# The export functions (`funcs`) already carry the full layered join
+# (file-qualified static match -> exact name -> key -> (file,line) loc/loc_base
+# fallback) done in the classify loop above; index their outcome so
+# parse_perfunc's exclusion decision agrees with that classification instead of
+# re-deriving a thinner exact+key-only view via reach_member.
+#
+# `llvm-cov report -show-functions` groups its rows under `File '<path>':`
+# section headers and prints the BARE symbol for statics, so the recompute
+# disambiguates statics by (basename(file), symbol) via func_member_by_file_sym
+# -- the SAME qualified key reach_state uses for the tally -- letting a covered
+# reachable static and a dead static that merely share a bare name in different
+# files get their own verdicts. The residual the basename key cannot split is
+# same-named statics in different directories that share a basename; there, and
+# on any bare-name (func_member_by_norm) collision, all three maps resolve
+# reachable-wins so a live function is never dropped from the denominators. At
+# worst a same-named dead static is kept in, which only under-reports coverage
+# (matching the over-approximation philosophy).
+func_member_by_file_sym = {}
+func_member_by_full = {}
+func_member_by_norm = {}
+for _fn in funcs:
+    _fk = (os.path.basename(_fn['file']), _fn['norm'])
+    if func_member_by_file_sym.get(_fk) != 'reachable':
+        func_member_by_file_sym[_fk] = _fn['member']
+    if func_member_by_full.get(_fn['name']) != 'reachable':
+        func_member_by_full[_fn['name']] = _fn['member']
+    if func_member_by_norm.get(_fn['norm']) != 'reachable':
+        func_member_by_norm[_fn['norm']] = _fn['member']
+
+
+def perfunc_member(name, srcfile=None):
+    n = name.rsplit(':', 1)[-1]
+    if srcfile is not None:
+        fk = (os.path.basename(srcfile), n)
+        if fk in func_member_by_file_sym:
+            return func_member_by_file_sym[fk]
+    if name in func_member_by_full:
+        return func_member_by_full[name]
+    if n in func_member_by_norm:
+        return func_member_by_norm[n]
+    return reach_member(name)
 
 
 file_metrics = {}
@@ -2226,7 +2351,7 @@ def parse_perfunc(path):
                 br, br_m = int(toks[7]), int(toks[8])
             except (ValueError, IndexError):
                 continue
-            if reach_member(name) == 'unreachable':
+            if perfunc_member(name, cur) == 'unreachable':
                 continue  # exclude statically-dead functions from every metric
             m = file_metrics[cur]
             m['fn'] += 1
@@ -2368,6 +2493,7 @@ if have_numbers:
 print('reachable=%d not-reached=%d unreachable=%d anomaly=%d'
       % (t_reachable, t_unreached, t_unreachable, t_anomaly))
 PYEOF
+  } | python3 - "$COVJSON" "$REACH" "$HTML_DIR" "$TEXT_DIR" "$SUMMARY" "$PERFUNC"
 }
 
 # ── command: report ───────────────────────────────────────────────────────────
@@ -2441,8 +2567,8 @@ cmd_report() {
     esac
   fi
 
-  # Validate --reachability path (a .json, a dir with reached.txt/not_reached.txt,
-  # or a single allow/ignore .txt list) if supplied.
+  # Validate --reachability path (a .json, a dir with reachability.json or
+  # reached.txt/not_reached.txt, or a single allow/ignore .txt list) if supplied.
   if test -n "$REACHABILITY" && ! test -e "$REACHABILITY"; then
     err "--reachability path does not exist: $REACHABILITY"
     err "Pass the fuzz-reachability JSON, its output directory, or a sancov .txt list."
@@ -2639,8 +2765,13 @@ cmd_report() {
   }
 
   log "Generating text report..."
+  # -use-color=false: llvm-cov otherwise autodetects a TTY on stdout and writes
+  # ANSI escapes into the -output-dir text files, which are noise in a saved
+  # report and break --reachability's text annotation. Force plain, deterministic
+  # output regardless of whether stdout is a terminal.
   "$LLVM_COV" show "${SHOW_OPTS[@]}" \
     -format=text \
+    -use-color=false \
     -output-dir="$REPORT_DIR/text" || {
     err "llvm-cov show (text) failed"
     exit 1

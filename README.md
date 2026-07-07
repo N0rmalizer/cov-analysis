@@ -2,7 +2,7 @@
 
 Replacing `afl-cov` and `libfuzzer-cov` with modern coverage gathering and great features!
 
-Version: 1.0
+Version: 1.1-dev
 
 - [Introduction](#introduction)
 - [Prerequisites](#prerequisites)
@@ -169,16 +169,23 @@ cov-analysis -d /path/to/afl-fuzz-output/ -e "./cov @@" \
   --reachability /path/to/reachability/test.json
 ```
 
-`--reachability` accepts the analyzer's JSON report, its output directory
-(holding `reached.txt` / `not_reached.txt`), or a single SanitizerCoverage
-allow/ignore `.txt` list. The normal `llvm-cov` HTML and text reports are
-annotated **in place** (no separate report). In the HTML file view each
-function's lines are tinted:
+`--reachability` accepts the analyzer's JSON report, its output directory, or
+a single SanitizerCoverage allow/ignore `.txt` list. When a directory is
+passed, a `reachability.json` inside it is preferred (it carries richer data —
+indirect-call confidence, file/line, both mangled and demangled names) over
+the `reached.txt` / `not_reached.txt` lists, which are used only as a
+fallback when no `reachability.json` is present. The normal `llvm-cov` HTML
+and text reports are annotated **in place** (no separate report). In the
+HTML file view each function's lines are tinted:
 
 - **covered** — keeps `llvm-cov`'s usual coloring
-- **amber** — statically *reachable* but never reached (the actionable gap;
-  a lighter amber marks functions reachable only through over-approximated
-  indirect calls)
+- **amber** — statically *reachable* but never reached (the actionable gap),
+  shaded by the analyzer's per-function `confidence` (JSON mode only; the txt
+  lists carry no confidence, so they always render the plain shade): darkest
+  amber for `high` (a direct edge, or no confidence data at all), a lighter
+  amber for `medium` (reachable only through an indirect call with value-flow
+  evidence), and the lightest amber for `low` (an indirect call matched only
+  by type — the likely-spurious surface of the over-approximation)
 - **dark grey** — statically *unreachable*, so it is expected to stay
   uncovered — ignore it
 - **purple** — covered yet flagged unreachable (a static-analysis anomaly worth
@@ -188,6 +195,21 @@ The HTML `index.html` gains a tally banner. The text source view (`text/`) gets
 a per-line marker column (`U` unreachable, `R` reachable-but-unreached,
 `A` anomaly), and `summary.txt` gains a reachability tally plus the explicit
 list of reachable-but-not-reached functions to go after.
+
+> **Rust name/key matching only tolerates legacy mangling.** The name/`key`
+> join above tolerates the *legacy* Rust mangling scheme's `17h<hash>`
+> disambiguator drifting between the analyzed build and the coverage build.
+> Under Rust's **v0** mangling scheme (`_R…` symbols, which
+> `-Cinstrument-coverage` forces), fuzz-reachability's `key` equals the raw
+> mangled name — the normalization is inert for v0 — so a v0-mangled
+> instance whose disambiguator differs between the two builds will not match
+> by name or `key`. When the reachability report is the JSON report (not the
+> `.txt` lists) and carries `file`/`line` for the function (i.e. the
+> analyzed bitcode has debug info), the `(file, line)` fallback used above
+> still classifies it correctly; without debug info the function has no
+> fallback and is left `unknown`. See fuzz-reachability's README for the
+> full explanation; full v0-aware key normalization is a future enhancement
+> there, not yet implemented.
 
 **The coverage numbers themselves are recomputed to exclude unreachable
 functions.** Normally a function coverage of `5/6` counts a statically-dead
@@ -327,9 +349,11 @@ Optional:
   --ignore-regex <r> Filename regex to exclude from llvm-cov reports
                      (default: /usr/include/)
   --reachability <p> Cross-reference fuzz-reachability output (its JSON report,
-                     output directory, or a sancov allow/ignore .txt list) and
-                     annotate the HTML + text reports in place: functions tinted
-                     amber=reachable but not reached, dark grey=unreachable,
+                     output directory — reachability.json when present, else
+                     reached.txt/not_reached.txt — or a sancov allow/ignore
+                     .txt list) and annotate the HTML + text reports in
+                     place: functions tinted amber=reachable but not
+                     reached, dark grey=unreachable,
                      purple=covered yet flagged unreachable; text gets a U/R/A
                      marker column and summary.txt a reachability tally.
   -v                 Verbose output
@@ -375,8 +399,9 @@ Usage: cov-analysis diff [-o <dir>] [--reachability <p>] [<OLD_JSON> <NEW_JSON>]
   Defaults to <report-dir>/coverage_old.json and <report-dir>/coverage.json.
 
   --reachability <p> cross-references fuzz-reachability output (JSON, output
-  directory, or a sancov .txt list) and splits the still-uncovered functions
-  into reachable (amber, actionable) vs unreachable (grey, expected dead).
+  directory — reachability.json when present, else reached.txt/not_reached.txt
+  — or a sancov .txt list) and splits the still-uncovered functions into
+  reachable (amber, actionable) vs unreachable (grey, expected dead).
 ```
 
 ### cov-analysis stability
