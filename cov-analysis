@@ -56,11 +56,21 @@ require_gnu_command() {
   esac
 }
 
+require_coreutils_command() {
+  local cmd="$1" purpose="$2" version
+  require_command "$cmd" "$purpose" || return 1
+  version="$("$cmd" --version 2>/dev/null || true)"
+  case "$version" in
+    *"GNU coreutils"*|*"uutils coreutils"*) ;;
+    *) err "$purpose requires '$cmd' from GNU coreutils or uutils coreutils."; return 1 ;;
+  esac
+}
+
 require_replay_commands() {
   local purpose="$1"
   require_gnu_command find "GNU findutils" "$purpose" || return 1
   require_gnu_command xargs "GNU findutils" "$purpose" || return 1
-  require_gnu_command timeout "GNU coreutils" "$purpose" || return 1
+  require_coreutils_command timeout "$purpose" || return 1
   local cmd
   for cmd in mktemp realpath sort tr wc; do
     require_command "$cmd" "$purpose" || return 1
@@ -2908,8 +2918,8 @@ cmd_report() {
   fi
 
   require_replay_commands "cov-analysis report" || exit 1
-  require_gnu_command mv "GNU coreutils" "cov-analysis report" || exit 1
-  require_gnu_command realpath "GNU coreutils" "cov-analysis report" || exit 1
+  require_coreutils_command mv "cov-analysis report" || exit 1
+  require_coreutils_command realpath "cov-analysis report" || exit 1
   if test -n "$REACHABILITY"; then
     require_command python3 "report --reachability" || exit 1
     if ! validate_reachability "$REACHABILITY"; then

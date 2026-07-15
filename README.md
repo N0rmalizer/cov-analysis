@@ -47,9 +47,10 @@ The coverage reports can be augmented with harness reachability information from
   version. When a versioned compiler is chosen (e.g. `CC=clang-22`, or the
   default `clang` reports version 22), the matching `llvm-profdata-22` /
   `llvm-cov-22` are used so the raw profiles merge without a version mismatch.
-- GNU findutils (`find` and `xargs`) and GNU coreutils (`timeout`, `mktemp`,
-  `realpath`, `mv`, `sort`, `tr`, and `wc`). Timed replays send `TERM`, escalate to
-  `KILL` after one second, and clean up the spawned process group.
+- GNU findutils (`find` and `xargs`) and either GNU coreutils or uutils coreutils
+  (`timeout`, `mktemp`, `realpath`, `mv`, `sort`, `tr`, and `wc`). Timed replays
+  send `TERM`, escalate to `KILL` after one second, and clean up the spawned
+  process group.
 - Python 3 for `diff` and `report --reachability`.
 - GNU awk (`gawk`) for `stability`.
 - AFL++ (`afl-fuzz`), libafl, libfuzzer, Honggfuzz, ... - only needed to produce the corpus, not to run `cov-analysis`
