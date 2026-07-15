@@ -83,3 +83,41 @@ detect_clang() {
   done
   return 1
 }
+
+rustc_llvm_major() {
+  rustc -vV 2>/dev/null | awk -F: '/^LLVM version:/ { gsub(/^[ \t]+/, "", $2); split($2, v, "."); print v[1]; exit }'
+}
+
+llvm_tool_major() {
+  local tool="$1" out
+  out="$("$tool" --version 2>/dev/null || true)"
+  case "$out" in
+    *'Apple clang'*) return 1 ;;
+  esac
+  printf '%s\n' "$out" | grep -Eio '(clang|LLVM) version [0-9]+' \
+    | grep -Eo '[0-9]+' | head -n1
+}
+
+matching_llvm_tool() {
+  local base="$1" major="$2" candidate found got
+  for candidate in "$base" "$base-$major"; do
+    found="$(command -v "$candidate" 2>/dev/null || true)"
+    test -n "$found" || continue
+    got="$(llvm_tool_major "$found" || true)"
+    if test "$got" = "$major"; then
+      printf '%s\n' "$found"
+      return 0
+    fi
+  done
+  return 1
+}
+
+select_rust_llvm_toolchain() {
+  local major clang cov prof
+  major="$(rustc_llvm_major)"
+  test -n "$major" || return 1
+  clang="$(matching_llvm_tool clang "$major")" || return 1
+  cov="$(matching_llvm_tool llvm-cov "$major")" || return 1
+  prof="$(matching_llvm_tool llvm-profdata "$major")" || return 1
+  printf '%s\t%s\t%s\t%s\n' "$major" "$clang" "$cov" "$prof"
+}

@@ -1,5 +1,7 @@
 # cov-analysis - Fuzzing Code Coverage for AFL++, libFuzzer, libafl, and honggfuzz
 
+![CI](https://github.com/vanhauser-thc/cov-analysis/actions/workflows/ci.yml/badge.svg)
+
 Replacing `afl-cov` and `libfuzzer-cov` with modern coverage gathering and great features!
 
 Version: 1.1-dev
@@ -39,23 +41,31 @@ The coverage reports can be augmented with harness reachability information from
 
 ## Prerequisites
 
+- Bash
 - `clang` (any version down to 11)
 - `llvm-profdata` and `llvm-cov` — auto-detected to match the selected clang
   version. When a versioned compiler is chosen (e.g. `CC=clang-22`, or the
   default `clang` reports version 22), the matching `llvm-profdata-22` /
   `llvm-cov-22` are used so the raw profiles merge without a version mismatch.
+- GNU findutils (`find` and `xargs`) and GNU coreutils (`timeout`, `mktemp`,
+  `realpath`, `mv`, `sort`, `tr`, and `wc`). Timed replays send `TERM`, escalate to
+  `KILL` after one second, and clean up the spawned process group.
+- Python 3 for `diff` and `report --reachability`.
+- GNU awk (`gawk`) for `stability`.
 - AFL++ (`afl-fuzz`), libafl, libfuzzer, Honggfuzz, ... - only needed to produce the corpus, not to run `cov-analysis`
 
 ## Supported Fuzzers
 
 | Fuzzer     | Detected by                                | Input files replayed                                                          |
 |------------|--------------------------------------------|-------------------------------------------------------------------------------|
-| AFL++      | `<dir>/queue/` or `<dir>/*/queue/` exists  | `queue/id:*`, `crashes/id:*`, `timeouts/id:*`                                 |
+| AFL++      | queue/crashes/timeouts under `<dir>` or a worker | `queue/id:*`, `crashes/id:*`, `timeouts/id:*`                            |
 | libFuzzer  | flat directory of files, no `queue/`       | all files except `crash-*`/`leak-*`/`oom-*`/`timeout-*`/`slow-unit-*`        |
 | libafl     | flat directory of files, no `queue/`       | all files except `crash-*`/`leak-*`/`oom-*`/`timeout-*`/`slow-unit-*`        |
 | honggfuzz  | flat directory of files, no `queue/`       | all files except `SIG*.fuzz` and `HONGGFUZZ.REPORT.TXT`                       |
 
-For libFuzzer, libafl and honggfuzz, crash-like files (above) are still replayed, but under the `-T` timeout so a hanging input can't stall the run.
+Only regular files are selected. Directories and symlinks are never counted or
+replayed. For libFuzzer, libafl and honggfuzz, crash-like files are replayed
+under the `-T` hard deadline so a hanging input cannot stall the run.
 
 Override auto-detection with `--layout afl|flat`.
 
@@ -74,12 +84,18 @@ cov-analysis build ./configure --disable-shared
 cov-analysis build make -j$(nproc)
 ```
 
-`cov-analysis build` sets:
+`cov-analysis build` resolves a Clang pair and appends these options to the
+caller's existing values:
 ```
 CC=clang  CXX=clang++
-CFLAGS="-fprofile-instr-generate -fcoverage-mapping -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION=1"
-LDFLAGS="-fprofile-instr-generate"
+CFLAGS/CXXFLAGS+=" -fprofile-instr-generate -fcoverage-mapping"
+CPPFLAGS+=" -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION=1"
+LDFLAGS+=" -fprofile-instr-generate"
 ```
+
+An explicitly supplied `CC` or `CXX` is preserved. The missing counterpart is
+derived for unversioned, versioned, and absolute-path Clang names. Set both
+variables for a custom compiler wrapper that cannot be paired safely.
 
 **Important:** `FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION=1` must match what was used during fuzzing - it disables the same checksums/HMACs that AFL++ bypassed.
 
@@ -95,7 +111,11 @@ clang -fprofile-instr-generate \
   coverage_driver.o -L./build -ltarget -o cov
 ```
 
-The driver loops over all file arguments, calls `LLVMFuzzerTestOneInput` for each, and installs a crash handler that flushes profiling data so crashing inputs still contribute to the report.
+The driver loops over all file arguments, calls `LLVMFuzzerTestOneInput` for
+each, and installs a crash handler that attempts to flush profiling data before
+re-raising the original signal. This is best effort:
+`__llvm_profile_write_file()` is not async-signal-safe and can fail after severe
+memory corruption.
 
 ### Step 2: Generate Coverage Report
 
@@ -129,6 +149,7 @@ For libfuzzer/libafl/Honggfuzz `cov-analysis` will:
 Output:
 ```
 /path/to/afl-fuzz-output/cov/
+  .cov-analysis-report ← ownership marker for safe replacement
   html/index.html     ← browse this for annotated source coverage
   text/               ← text format, suitable for automated analysis
   summary.txt         ← per-file line/branch/function percentages
@@ -136,11 +157,39 @@ Output:
   coverage.profdata   ← merged profile (baseline for iterative improvement)
 ```
 
+Report publication is transactional. All artifacts are generated and validated
+in a sibling staging directory on the same filesystem, including optional
+reachable-only metrics and annotations. The prior report is moved aside only
+for the final rename and is restored if publication fails. A second successful
+run copies the prior `coverage.json` into the staged report as
+`coverage_old.json`.
+
+A non-empty output directory is replaceable only when it contains the
+`.cov-analysis-report` ownership marker. New and empty destinations are allowed.
+To migrate a complete report created by an older pre-marker release, run the
+new report once with `--migrate-existing-report`. The option validates the old
+HTML, text, summary, JSON, and profile artifacts; it never adopts an arbitrary
+directory. A failed migration run leaves the old report unchanged.
+
 For stdin-based targets (binary reads from stdin, no file argument):
 
 ```bash
 cov-analysis -d /path/to/afl-fuzz-output/ -e "./target"
 ```
+
+Simple `-e` commands retain automatic binary discovery. Use `--binary` when the
+shell command contains a quoted binary path, `env`, a wrapper, or other shell
+syntax; that explicit path is validated independently and used for driver
+detection and all LLVM operations:
+
+```bash
+cov-analysis -d out -e 'env MODE=cov "/opt/my app/cov" @@' \
+  --binary "/opt/my app/cov"
+cov-analysis -d out -e './coverage-wrapper ./cov @@' --binary ./cov
+```
+
+Every `-e` string is executed by Bash. Trailing, embedded, and omitted `@@`
+therefore accept the same shell language.
 
 #### libFuzzer corpus
 
@@ -148,7 +197,11 @@ cov-analysis -d /path/to/afl-fuzz-output/ -e "./target"
 cov-analysis -d /path/to/libfuzzer-corpus/ -e "./cov @@"
 ```
 
-Corpus files are replayed in batch mode. If your libFuzzer run used `-artifact_prefix=./crashes/`, point a second run at that directory to cover crash inputs too — or move artifacts into the corpus dir beforehand.
+Corpus files are replayed in batch mode when the selected binary carries the
+cov-analysis driver signature; other targets use the one-input loop. If your
+libFuzzer run used `-artifact_prefix=./crashes/`, point a second run at that
+directory to cover crash inputs too — or move artifacts into the corpus dir
+beforehand.
 
 #### honggfuzz workspace
 
@@ -231,6 +284,12 @@ math exactly), re-summed over the reachable set; the unmodified figures remain
 in `coverage.json`. With `--reachability` the HTML index is rendered flat
 (directory grouping disabled) so its cells can be rewritten reliably.
 
+An explicitly requested reachability report is all-or-nothing. Its input is
+parsed before replay starts, and invalid input, per-function metric failure, or
+annotation failure returns nonzero without changing the last successful report.
+Exit status 0 guarantees the banner, tally, annotations, and reachable-only
+metrics are present.
+
 `cov-analysis diff` accepts the same `--reachability` flag; it splits the
 "still uncovered functions" list in the diff report into reachable (amber,
 actionable) and unreachable (grey, expected dead).
@@ -243,12 +302,18 @@ Compare coverage between two `llvm-cov` JSON exports and generate an HTML diff r
 cov-analysis diff coverage_old.json coverage_new.json
 ```
 
-If you use the same output directory for a subsequent run, `cov-analysis` renames the existing `coverage.json` to `coverage_old.json` automatically, so `cov-analysis diff` works with no arguments.
+If you use the same output directory for a subsequent run, `cov-analysis`
+copies the previous successful `coverage.json` into the staged
+`coverage_old.json`, so `cov-analysis diff` works with no arguments.
 
 The report is written to `<report-dir>/coverage_diff.html` and shows:
 - Newly covered and no-longer-covered lines per file
 - Newly covered and lost functions
 - Source code snippets annotated with coverage change
+
+The default is a full report, including unchanged files and their
+still-uncovered lines/functions. Add `--only-changed` to omit unchanged files.
+Aggregate cards say whether their scope is all files or changed files only.
 
 If the JSON paths are omitted, `cov-analysis diff` defaults to `<report-dir>/coverage_old.json` and `<report-dir>/coverage.json`. Run with no arguments and neither default report present in the current directory, it prints the help instead of an error.
 
@@ -264,7 +329,13 @@ The `stability` command identifies them.
 
 ```bash
 cov-analysis stability -d ../afl/out -e "./cov @@"
+cov-analysis stability -d ../afl/out -e "./cov @@" -T 2
 ```
+
+The denominator is the union of source lines executed at least once across all
+successful passes. Lines that are zero or absent in every pass are excluded;
+a zero/absent-to-positive transition is included and classified unstable. If no
+line executes in any successful pass, stability is `n/a`.
 
 This will give you the exact lines that are problematic, e.g.:
 ```
@@ -316,7 +387,12 @@ crash and timeout inputs, and `-t N` to parallelize:
 cov-analysis search src/parser.c:142 -d ../afl/out -e "./cov @@" --crashes -t 8
 ```
 
-A fast union pre-check replays the whole corpus once first; if no input reaches
+`--crashes` also works for a crash-only flat directory or AFL++ output tree.
+Without it, a crash-only directory correctly reports that no corpus input was
+selected.
+
+A fast union pre-check replays the whole corpus once first; `-T` bounds every
+selected input in this phase and in the isolated scan. If no input reaches
 the line, `search` reports `0 of N` immediately (and tells you whether the line
 is merely unreached or not present in the coverage data at all) without the full
 per-input scan.
@@ -353,6 +429,8 @@ Optional:
   -o <dir>           Report output directory (default: <afl-dir>/cov)
   -t <num>           Parallel replay workers/forks (default: 1)
   -T <secs>          Timeout for crash/timeout replay (default: 5)
+  --binary <path>    Instrumented binary for LLVM and driver detection;
+                     required when -e has quoted paths, wrappers, or shell syntax
   --layout <kind>    Force layout: 'afl' or 'flat' (default: auto-detect)
   --ignore-regex <r> Filename regex to exclude from llvm-cov reports
                      (default: /usr/include/)
@@ -364,6 +442,10 @@ Optional:
                      reached, dark grey=unreachable,
                      purple=covered yet flagged unreachable; text gets a U/R/A
                      marker column and summary.txt a reachability tally.
+                     Any reachability/recompute failure makes report fail.
+  --migrate-existing-report
+                     Explicitly replace a complete pre-marker report after a
+                     successful staged run; arbitrary directories are refused
   -v                 Verbose output
   -q                 Quiet mode
   -V                 Print version and exit
@@ -375,8 +457,8 @@ Optional:
 ```
 Usage: cov-analysis build <build-command> [args...]
 
-  Sets CC/CXX/CFLAGS/CXXFLAGS/LDFLAGS for LLVM source-based coverage and
-  runs the given build command.
+  Resolves CC/CXX, appends coverage options to existing CFLAGS, CXXFLAGS,
+  CPPFLAGS, and LDFLAGS, and runs the given build command.
 ```
 
 ### cov-analysis driver
@@ -388,8 +470,8 @@ Usage: cov-analysis driver [-o output.c]
   Use this for LLVMFuzzerTestOneInput harnesses to replay corpus files.
 
   The driver loops over all file arguments, calls LLVMFuzzerTestOneInput
-  for each, and installs a crash handler that flushes profiling data so
-  crashing inputs still contribute to the coverage report.
+  for each, and makes a best-effort crash-time profile flush before
+  re-raising the original signal. The profile writer is not async-signal-safe.
 
 Options:
   -o <file>     Write driver source to FILE instead of stdout
@@ -398,7 +480,7 @@ Options:
 ### cov-analysis diff
 
 ```
-Usage: cov-analysis diff [-o <dir>] [--reachability <p>] [<OLD_JSON> <NEW_JSON>]
+Usage: cov-analysis diff [-o <dir>] [--only-changed] [--reachability <p>] [<OLD_JSON> <NEW_JSON>]
 
   Compare coverage between two llvm-cov JSON exports and generate an
   HTML diff report showing newly covered, lost, and still-uncovered
@@ -410,6 +492,7 @@ Usage: cov-analysis diff [-o <dir>] [--reachability <p>] [<OLD_JSON> <NEW_JSON>]
   directory — reachability.json when present, else reached.txt/not_reached.txt
   — or a sancov .txt list) and splits the still-uncovered functions into
   reachable (amber, actionable) vs unreachable (grey, expected dead).
+  --only-changed omits unchanged files; the default full report retains them.
 ```
 
 ### cov-analysis stability
@@ -439,6 +522,8 @@ Optional:
   -s <prefix>        Only consider source lines whose file path contains
                      this prefix (e.g. -s src/)
   -t <num>           Parallel replay workers (default: 1)
+  -T <secs>          Per-input timeout in seconds (default: 5)
+  --binary <path>    Instrumented binary for ambiguous -e shell commands
   --layout <kind>    Force layout: 'afl' or 'flat' (default: auto-detect)
   -v                 Verbose output
   -q                 Quiet mode (suppress all [+] output)
@@ -454,6 +539,7 @@ Examples:
 cov-analysis stability -d out/ -e "./cov @@"
 cov-analysis stability -d out/ -e "./cov @@" -n 8 -s src/
 cov-analysis stability -d ./corpus -e "./cov @@" -t 4
+cov-analysis stability -d out/ -e "./cov @@" -T 2
 ```
 
 ### cov-analysis search
@@ -478,6 +564,8 @@ Optional:
   --crashes          Also scan crash and timeout inputs (default: corpus only)
   -t <num>           Parallel workers for the per-input scan (default: 1)
   -T <secs>          Per-input replay timeout in seconds (default: 5)
+                     Applies in both union and isolated replay
+  --binary <path>    Instrumented binary for ambiguous -e shell commands
   --layout <kind>    Force layout: 'afl' or 'flat' (default: auto-detect)
   -v                 Verbose output
   -q                 Quiet mode

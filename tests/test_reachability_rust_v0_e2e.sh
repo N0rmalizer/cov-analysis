@@ -17,18 +17,20 @@ command -v python3 >/dev/null 2>&1 || { echo "[SKIP] python3 not available"; exi
 command -v cargo >/dev/null 2>&1 || { echo "[SKIP] cargo not available"; exit 0; }
 command -v rustc >/dev/null 2>&1 || { echo "[SKIP] rustc not available"; exit 0; }
 
-CLANG="$(detect_clang || true)"
-[ -n "$CLANG" ] || { echo "[SKIP] clang not available"; exit 0; }
-ver="${CLANG#clang}"; ver="${ver#-}"
-COVTOOL=""
-for c in "llvm-cov${ver:+-$ver}" llvm-cov; do command -v "$c" >/dev/null 2>&1 && { COVTOOL="$c"; break; }; done
-PROFDATA=""
-for p in "llvm-profdata${ver:+-$ver}" llvm-profdata; do command -v "$p" >/dev/null 2>&1 && { PROFDATA="$p"; break; }; done
-[ -n "$COVTOOL" ]        || { echo "[SKIP] llvm-cov not available"; exit 0; }
-[ -n "${PROFDATA:-}" ]   || { echo "[SKIP] llvm-profdata not available"; exit 0; }
-
 trap 'rm -rf "$TMP"' EXIT
 TMP=$(mktmp)
+TOOLCHAIN="$(select_rust_llvm_toolchain || true)"
+if test -z "$TOOLCHAIN"; then
+  RUST_MAJOR="$(rustc_llvm_major || true)"
+  echo "[SKIP] rustc LLVM ${RUST_MAJOR:-unknown} has no complete matching clang/llvm-cov/llvm-profdata set"
+  exit 0
+fi
+IFS=$'\t' read -r RUST_MAJOR CLANG COVTOOL PROFDATA <<< "$TOOLCHAIN"
+TOOLBIN="$TMP/llvm-tools"
+mkdir -p "$TOOLBIN"
+ln -s "$COVTOOL" "$TOOLBIN/llvm-cov"; ln -s "$COVTOOL" "$TOOLBIN/llvm-cov-$RUST_MAJOR"
+ln -s "$PROFDATA" "$TOOLBIN/llvm-profdata"; ln -s "$PROFDATA" "$TOOLBIN/llvm-profdata-$RUST_MAJOR"
+export PATH="$TOOLBIN:$PATH" CC="$CLANG"
 WORK="$TMP/work"
 cp -r "$FIXTURE" "$WORK"
 
@@ -102,7 +104,7 @@ echo "[PASS] stage 3: coverage_driver.c linked against the Rust staticlib"
 
 mkdir -p "$WORK/corpus"
 printf '\x05' > "$WORK/corpus/seed1"
-PATH=/usr/bin:$PATH bash "$COV" report -d "$WORK/corpus" -e "$WORK/cov @@" \
+bash "$COV" report -d "$WORK/corpus" -e "$WORK/cov @@" \
   --reachability "$WORK/reach.json" -o "$WORK/covout" > "$TMP/report.log" 2>&1 \
   || die "cov-analysis report failed: $(cat "$TMP/report.log")"
 [ -f "$WORK/covout/coverage.json" ] || die "covout/coverage.json was not produced"
@@ -161,7 +163,7 @@ d = json.load(open('$WORK/reach.nulled.json'))
 assert all(fn['file'] is None and fn['line'] is None for fn in d['reachable'] + d['unreachable_defined'])
 " || die "reach.nulled.json setup did not strip file/line as expected"
 
-PATH=/usr/bin:$PATH bash "$COV" report -d "$WORK/corpus" -e "$WORK/cov @@" \
+bash "$COV" report -d "$WORK/corpus" -e "$WORK/cov @@" \
   --reachability "$WORK/reach.nulled.json" -o "$WORK/covout_nameonly" > "$TMP/report_nameonly.log" 2>&1 \
   || die "cov-analysis report (file/line stripped from reachability.json) failed: $(cat "$TMP/report_nameonly.log")"
 assert_v0_report "$WORK/covout_nameonly" "file/line-stripped run"

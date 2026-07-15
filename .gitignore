@@ -1,1 +1,6 @@
 .worktrees/
+tests/cov
+tests/test
+tests/unstable
+tests/in/
+tests/out/

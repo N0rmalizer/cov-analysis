@@ -8,6 +8,7 @@ all:
 	@echo "Run 'sudo make install' to install to $(BINDIR)"
 
 install: $(SCRIPTS)
+	install -d $(BINDIR)
 	install -m 0755 $(SCRIPTS) $(BINDIR)
 
 uninstall:

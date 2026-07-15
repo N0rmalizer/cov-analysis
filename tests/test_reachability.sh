@@ -353,7 +353,7 @@ grep -q "reach-grey'>" "$TMP/rust_html/coverage/rust.rs.html" \
 echo "[PASS] report path: Rust generic hash-key fallback"
 
 # diff path: same reachability input, genfunc still-uncovered in both old and
-# new coverage (helper_fn newly covered keeps the file in --only-changed) →
+# new coverage while helper_fn becomes newly covered →
 # genfunc must land in the grey (unreachable) chip group, not the default
 # amber "not in reachability set" bucket.
 cat > "$TMP/rust_old.json" << EOF
